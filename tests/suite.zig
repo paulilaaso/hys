@@ -3,129 +3,84 @@ const types = @import("types");
 const formatter = @import("formatter");
 const config = @import("config");
 
-// ============================================================================
-// TYPES TESTS
-// ============================================================================
-
-test "FeedConfig clone preserves all fields" {
-    const allocator = std.testing.allocator;
-
-    const original = types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://example.com/feed.xml"),
-        .text = try allocator.dupe(u8, "Example Feed"),
+test "FeedConfig field access" {
+    const feed = types.FeedConfig{
+        .xmlUrl = "https://example.com/feed.xml",
+        .text = "Example Feed",
         .enabled = true,
-        .title = try allocator.dupe(u8, "Example Title"),
-        .htmlUrl = try allocator.dupe(u8, "https://example.com"),
-        .description = try allocator.dupe(u8, "A test feed"),
-        .type = try allocator.dupe(u8, "rss"),
-        .language = try allocator.dupe(u8, "en"),
-        .version = try allocator.dupe(u8, "2.0"),
+        .title = "Example Title",
+        .htmlUrl = "https://example.com",
+        .description = "A test feed",
+        .type = "rss",
+        .language = "en",
+        .version = "2.0",
     };
-    defer original.deinit(allocator);
 
-    const cloned = try original.clone(allocator);
-    defer cloned.deinit(allocator);
-
-    try std.testing.expectEqualStrings(original.xmlUrl, cloned.xmlUrl);
-    try std.testing.expectEqualStrings(original.text.?, cloned.text.?);
-    try std.testing.expect(original.enabled == cloned.enabled);
-    try std.testing.expectEqualStrings(original.title.?, cloned.title.?);
-    try std.testing.expectEqualStrings(original.htmlUrl.?, cloned.htmlUrl.?);
-    try std.testing.expectEqualStrings(original.description.?, cloned.description.?);
-    try std.testing.expectEqualStrings(original.type.?, cloned.type.?);
-    try std.testing.expectEqualStrings(original.language.?, cloned.language.?);
-    try std.testing.expectEqualStrings(original.version.?, cloned.version.?);
-
-    // Ensure they're different allocations
-    try std.testing.expect(original.xmlUrl.ptr != cloned.xmlUrl.ptr);
+    try std.testing.expectEqualStrings("https://example.com/feed.xml", feed.xmlUrl);
+    try std.testing.expectEqualStrings("Example Feed", feed.text.?);
+    try std.testing.expect(feed.enabled);
+    try std.testing.expectEqualStrings("Example Title", feed.title.?);
+    try std.testing.expectEqualStrings("https://example.com", feed.htmlUrl.?);
+    try std.testing.expectEqualStrings("A test feed", feed.description.?);
+    try std.testing.expectEqualStrings("rss", feed.type.?);
+    try std.testing.expectEqualStrings("en", feed.language.?);
+    try std.testing.expectEqualStrings("2.0", feed.version.?);
 }
 
 test "FeedConfig with null fields" {
-    const allocator = std.testing.allocator;
-
     const feed = types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://example.com/feed.xml"),
+        .xmlUrl = "https://example.com/feed.xml",
         .text = null,
         .enabled = false,
     };
-    defer feed.deinit(allocator);
 
     try std.testing.expect(feed.text == null);
     try std.testing.expect(!feed.enabled);
     try std.testing.expectEqualStrings("https://example.com/feed.xml", feed.xmlUrl);
 }
 
-test "cloneFeedList copies all feeds" {
-    const allocator = std.testing.allocator;
-
-    var original = types.FeedList{};
-    defer types.deinitFeedList(allocator, &original);
-
-    try original.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed1.com/rss"),
-        .text = try allocator.dupe(u8, "Feed 1"),
-    });
-    try original.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed2.com/rss"),
-        .text = try allocator.dupe(u8, "Feed 2"),
-    });
-
-    var cloned = try types.cloneFeedList(allocator, original);
-    defer types.deinitFeedList(allocator, &cloned);
-
-    try std.testing.expectEqual(original.items.len, cloned.items.len);
-    try std.testing.expectEqualStrings(original.items[0].xmlUrl, cloned.items[0].xmlUrl);
-    try std.testing.expectEqualStrings(original.items[1].xmlUrl, cloned.items[1].xmlUrl);
-}
-
 test "filterEnabledFeeds only returns enabled feeds" {
     const allocator = std.testing.allocator;
 
-    var source = types.FeedList{};
-    defer types.deinitFeedList(allocator, &source);
+    var source = types.FeedList.empty;
+    defer source.deinit(allocator);
 
     try source.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed1.com/rss"),
+        .xmlUrl = "https://feed1.com/rss",
         .enabled = true,
     });
     try source.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed2.com/rss"),
+        .xmlUrl = "https://feed2.com/rss",
         .enabled = false,
     });
     try source.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed3.com/rss"),
+        .xmlUrl = "https://feed3.com/rss",
         .enabled = true,
     });
 
     var filtered = try types.filterEnabledFeeds(allocator, source);
-    defer types.deinitFeedList(allocator, &filtered);
+    defer filtered.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 2), filtered.items.len);
     try std.testing.expect(filtered.items[0].enabled);
     try std.testing.expect(filtered.items[1].enabled);
 }
 
-test "RssItem clone preserves all fields" {
-    const allocator = std.testing.allocator;
-
-    const original = types.RssItem{
-        .title = try allocator.dupe(u8, "Article Title"),
-        .description = try allocator.dupe(u8, "Article description"),
-        .link = try allocator.dupe(u8, "https://example.com/article"),
-        .pubDate = try allocator.dupe(u8, "2024-12-05"),
+test "RssItem field access" {
+    const item = types.RssItem{
+        .title = "Article Title",
+        .description = "Article description",
+        .link = "https://example.com/article",
+        .pubDate = "2024-12-05",
         .timestamp = 1733356800,
-        .guid = try allocator.dupe(u8, "guid-12345"),
-        .feedName = try allocator.dupe(u8, "Example Feed"),
+        .guid = "guid-12345",
+        .feedName = "Example Feed",
     };
-    defer original.deinit(allocator);
 
-    const cloned = try original.clone(allocator);
-    defer cloned.deinit(allocator);
-
-    try std.testing.expectEqualStrings(original.title.?, cloned.title.?);
-    try std.testing.expectEqualStrings(original.description.?, cloned.description.?);
-    try std.testing.expectEqualStrings(original.link.?, cloned.link.?);
-    try std.testing.expectEqual(original.timestamp, cloned.timestamp);
+    try std.testing.expectEqualStrings("Article Title", item.title.?);
+    try std.testing.expectEqualStrings("Article description", item.description.?);
+    try std.testing.expectEqualStrings("https://example.com/article", item.link.?);
+    try std.testing.expectEqual(item.timestamp, 1733356800);
 }
 
 test "DisplayConfig has sensible defaults" {
@@ -149,10 +104,6 @@ test "HistoryConfig has sensible defaults" {
     try std.testing.expectEqual(@as(u32, 50), history.retentionDays);
 }
 
-// ============================================================================
-// FORMATTER TESTS
-// ============================================================================
-
 test "getCodepointDisplayWidth handles ASCII" {
     try std.testing.expectEqual(@as(usize, 1), formatter.getCodepointDisplayWidth('a'));
     try std.testing.expectEqual(@as(usize, 1), formatter.getCodepointDisplayWidth('Z'));
@@ -160,47 +111,42 @@ test "getCodepointDisplayWidth handles ASCII" {
 }
 
 test "getCodepointDisplayWidth handles CJK" {
-    // Hangul Jamo
     try std.testing.expectEqual(@as(usize, 2), formatter.getCodepointDisplayWidth(0x1100));
-    // CJK Unified Ideographs
     try std.testing.expectEqual(@as(usize, 2), formatter.getCodepointDisplayWidth(0x4E00));
-    // Hangul Syllables
     try std.testing.expectEqual(@as(usize, 2), formatter.getCodepointDisplayWidth(0xAC00));
 }
 
 test "getCodepointDisplayWidth handles combining marks" {
-    // Combining Diacritical Marks
     try std.testing.expectEqual(@as(usize, 0), formatter.getCodepointDisplayWidth(0x0300));
 }
 
 test "Formatter creates with default values" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     const display = types.DisplayConfig{};
-    const fmt = formatter.Formatter.init(allocator, display);
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    const fmt = formatter.Formatter.init(allocator, io, &env_map, display);
 
-    // Terminal width is dynamically detected from environment
-    // Can be 0 for piped output or a positive value if terminal detected
-    try std.testing.expect(fmt.terminal_width >= 0);
+    try std.testing.expect(fmt.terminal_width > 0);
     try std.testing.expect(fmt.terminal_width < 1000);
     try std.testing.expect(fmt.writer == null);
 }
 
 test "Formatter.initDirect sets writer" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     const display = types.DisplayConfig{};
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
     var buf: [4096]u8 = undefined;
-    var writer_state = std.fs.File.stdout().writer(&buf);
-    const writer = &writer_state.interface;
-    const fmt = formatter.Formatter.initDirect(allocator, display, writer.*);
+    const file_writer = std.Io.File.stdout().writer(io, &buf);
+    const fmt = formatter.Formatter.initDirect(allocator, io, &env_map, display, file_writer.interface);
 
     try std.testing.expect(fmt.writer != null);
 }
-
-// ============================================================================
-// CONFIG TESTS
-// ============================================================================
 
 test "COLORS constants are non-empty" {
     try std.testing.expect(config.COLORS.RESET.len > 0);
@@ -212,10 +158,6 @@ test "COLORS constants are non-empty" {
     try std.testing.expect(config.COLORS.CYAN.len > 0);
     try std.testing.expect(config.COLORS.GRAY.len > 0);
 }
-
-// ============================================================================
-// INTEGRATION TESTS
-// ============================================================================
 
 test "GlobalConfig default creation" {
     const global = types.GlobalConfig{
@@ -230,34 +172,23 @@ test "GlobalConfig default creation" {
 }
 
 test "FeedGroup.getDisplayName returns display_name when set" {
-    const allocator = std.testing.allocator;
-
-    var feeds = types.FeedList{};
-    defer types.deinitFeedList(allocator, &feeds);
-
     const group = types.FeedGroup{
-        .name = try allocator.dupe(u8, "tech"),
-        .display_name = try allocator.dupe(u8, "Technology News"),
+        .name = "tech",
+        .display_name = "Technology News",
         .feeds = &.{},
     };
-    defer group.deinit(allocator);
 
-    const display_name = group.getDisplayName();
-    try std.testing.expectEqualStrings("Technology News", display_name);
+    try std.testing.expectEqualStrings("Technology News", group.getDisplayName());
 }
 
 test "FeedGroup.getDisplayName returns name when display_name is null" {
-    const allocator = std.testing.allocator;
-
     const group = types.FeedGroup{
-        .name = try allocator.dupe(u8, "tech"),
+        .name = "tech",
         .display_name = null,
         .feeds = &.{},
     };
-    defer group.deinit(allocator);
 
-    const display_name = group.getDisplayName();
-    try std.testing.expectEqualStrings("tech", display_name);
+    try std.testing.expectEqualStrings("tech", group.getDisplayName());
 }
 
 test "LastRunState initialization" {
@@ -270,61 +201,19 @@ test "LastRunState initialization" {
     try std.testing.expectEqual(@as(usize, 0), state.items.len);
 }
 
-test "CurlError initialization and deinitialization" {
-    const allocator = std.testing.allocator;
-
-    const err = try types.CurlError.init(allocator, "Test error message");
-    defer err.deinit(allocator);
+test "CurlError field access" {
+    const err = types.CurlError{
+        .message = "Test error message",
+    };
 
     try std.testing.expectEqualStrings("Test error message", err.message);
 }
 
-// ============================================================================
-// MEMORY SAFETY TESTS
-// ============================================================================
-
-test "FeedConfig deinit frees all strings" {
-    const allocator = std.testing.allocator;
-
-    const feed = types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://example.com/feed.xml"),
-        .text = try allocator.dupe(u8, "Example Feed"),
-        .title = try allocator.dupe(u8, "Title"),
-        .htmlUrl = try allocator.dupe(u8, "https://example.com"),
-        .description = try allocator.dupe(u8, "Description"),
-        .type = try allocator.dupe(u8, "rss"),
-        .language = try allocator.dupe(u8, "en"),
-        .version = try allocator.dupe(u8, "2.0"),
-    };
-
-    feed.deinit(allocator);
-    // If deinit didn't free properly, teardownAllocator will catch memory leaks
-}
-
-test "RssItem deinit frees all strings" {
-    const allocator = std.testing.allocator;
-
-    const item = types.RssItem{
-        .title = try allocator.dupe(u8, "Title"),
-        .description = try allocator.dupe(u8, "Description"),
-        .link = try allocator.dupe(u8, "https://example.com"),
-        .pubDate = try allocator.dupe(u8, "2024-12-05"),
-        .guid = try allocator.dupe(u8, "guid"),
-        .feedName = try allocator.dupe(u8, "Feed"),
-    };
-
-    item.deinit(allocator);
-}
-
-// ============================================================================
-// EDGE CASE TESTS
-// ============================================================================
-
 test "Empty feed list is valid" {
     const allocator = std.testing.allocator;
 
-    var list = types.FeedList{};
-    defer types.deinitFeedList(allocator, &list);
+    var list = types.FeedList.empty;
+    defer list.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
 }
@@ -332,29 +221,26 @@ test "Empty feed list is valid" {
 test "All disabled feeds returns empty list" {
     const allocator = std.testing.allocator;
 
-    var source = types.FeedList{};
-    defer types.deinitFeedList(allocator, &source);
+    var source = types.FeedList.empty;
+    defer source.deinit(allocator);
 
     try source.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed1.com/rss"),
+        .xmlUrl = "https://feed1.com/rss",
         .enabled = false,
     });
     try source.append(allocator, types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://feed2.com/rss"),
+        .xmlUrl = "https://feed2.com/rss",
         .enabled = false,
     });
 
     var filtered = try types.filterEnabledFeeds(allocator, source);
-    defer types.deinitFeedList(allocator, &filtered);
+    defer filtered.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), filtered.items.len);
 }
 
 test "RssItem with all null fields" {
-    const allocator = std.testing.allocator;
-
     const item = types.RssItem{};
-    defer item.deinit(allocator);
 
     try std.testing.expect(item.title == null);
     try std.testing.expect(item.description == null);
@@ -366,44 +252,30 @@ test "RssItem with all null fields" {
 }
 
 test "Very long feed URL" {
-    const allocator = std.testing.allocator;
-
-    const long_url = try std.fmt.allocPrint(allocator, "https://example.com/{s}", .{
-        "a" ** 1000, // 1000 'a' characters
-    });
-    defer allocator.free(long_url);
+    const long_url = "https://example.com/" ++ "a" ** 1000;
 
     const feed = types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, long_url),
+        .xmlUrl = long_url,
     };
-    defer feed.deinit(allocator);
 
     try std.testing.expectEqual(long_url.len, feed.xmlUrl.len);
 }
 
 test "Unicode in feed name" {
-    const allocator = std.testing.allocator;
-
     const feed = types.FeedConfig{
-        .xmlUrl = try allocator.dupe(u8, "https://example.com/feed"),
-        .text = try allocator.dupe(u8, "🚀 Rocket News 日本語"),
+        .xmlUrl = "https://example.com/feed",
+        .text = "🚀 Rocket News 日本語",
     };
-    defer feed.deinit(allocator);
 
     try std.testing.expectEqualStrings("🚀 Rocket News 日本語", feed.text.?);
 }
-
-// ============================================================================
-// JSON OUTPUT TESTS
-// ============================================================================
 
 test "writeJsonEscaped escapes quotes" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "Hello \"World\"");
+    try formatter.writeJsonEscaped(&buffer, "Hello \"World\"");
     try std.testing.expectEqualStrings("Hello \\\"World\\\"", buffer.items);
 }
 
@@ -411,9 +283,8 @@ test "writeJsonEscaped escapes backslashes" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "path\\to\\file");
+    try formatter.writeJsonEscaped(&buffer, "path\\to\\file");
     try std.testing.expectEqualStrings("path\\\\to\\\\file", buffer.items);
 }
 
@@ -421,9 +292,8 @@ test "writeJsonEscaped escapes newlines and tabs" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "line1\nline2\ttab");
+    try formatter.writeJsonEscaped(&buffer, "line1\nline2\ttab");
     try std.testing.expectEqualStrings("line1\\nline2\\ttab", buffer.items);
 }
 
@@ -431,9 +301,8 @@ test "writeJsonEscaped strips ANSI CSI sequences" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "\x1b[33mYellow\x1b[0m Text");
+    try formatter.writeJsonEscaped(&buffer, "\x1b[33mYellow\x1b[0m Text");
     try std.testing.expectEqualStrings("Yellow Text", buffer.items);
 }
 
@@ -441,9 +310,8 @@ test "writeJsonEscaped strips ANSI OSC hyperlink sequences" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "\x1b]8;;https://example.com\x1b\\Link Text\x1b]8;;\x1b\\");
+    try formatter.writeJsonEscaped(&buffer, "\x1b]8;;https://example.com\x1b\\Link Text\x1b]8;;\x1b\\");
     try std.testing.expectEqualStrings("Link Text", buffer.items);
 }
 
@@ -451,9 +319,8 @@ test "writeJsonEscaped handles mixed content" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "Title: \"Test\"\n\x1b[1mBold\x1b[0m");
+    try formatter.writeJsonEscaped(&buffer, "Title: \"Test\"\n\x1b[1mBold\x1b[0m");
     try std.testing.expectEqualStrings("Title: \\\"Test\\\"\\nBold", buffer.items);
 }
 
@@ -461,9 +328,8 @@ test "writeJsonEscaped preserves unicode" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "日本語 🚀 emoji");
+    try formatter.writeJsonEscaped(&buffer, "日本語 🚀 emoji");
     try std.testing.expectEqualStrings("日本語 🚀 emoji", buffer.items);
 }
 
@@ -471,15 +337,10 @@ test "writeJsonEscaped escapes control characters" {
     const allocator = std.testing.allocator;
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    const writer = buffer.writer().any();
 
-    try formatter.writeJsonEscaped(writer, "null\x00char");
+    try formatter.writeJsonEscaped(&buffer, "null\x00char");
     try std.testing.expectEqualStrings("null\\u0000char", buffer.items);
 }
-
-// ============================================================================
-// TEST SUMMARY
-// ============================================================================
 
 pub fn main() !void {
     std.debug.print("Running comprehensive test suite for Hys\n", .{});

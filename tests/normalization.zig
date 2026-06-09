@@ -30,11 +30,11 @@ fn normalizeIdentifier(allocator: std.mem.Allocator, id: []const u8) ![]const u8
     }
 
     // Remove common tracking parameters
-    if (std.mem.indexOf(u8, working[0..end_idx], "?utm_")) |idx| {
+    if (std.mem.find(u8, working[0..end_idx], "?utm_")) |idx| {
         end_idx = idx;
-    } else if (std.mem.indexOf(u8, working[0..end_idx], "?fbclid=")) |idx| {
+    } else if (std.mem.find(u8, working[0..end_idx], "?fbclid=")) |idx| {
         end_idx = idx;
-    } else if (std.mem.indexOf(u8, working[0..end_idx], "?ref=")) |idx| {
+    } else if (std.mem.find(u8, working[0..end_idx], "?ref=")) |idx| {
         end_idx = idx;
     }
 
@@ -76,7 +76,7 @@ fn normalizeIdentifier(allocator: std.mem.Allocator, id: []const u8) ![]const u8
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

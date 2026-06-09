@@ -13,6 +13,17 @@ pub fn build(b: *std.Build) void {
     const zdt_dep = b.dependency("zdt", .{});
     const zdt_mod = zdt_dep.module("zdt");
 
+    // Setup C translation (replaces deprecated @cImport)
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (curl_include_path) |path| {
+        translate_c.addIncludePath(.{ .cwd_relative = path });
+    }
+    const c_mod = translate_c.createModule();
+
     // Create shared modules (used by tests and benchmarks)
     const types_mod = b.createModule(.{
         .root_source_file = b.path("src/types.zig"),
@@ -23,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "types", .module = types_mod },
             .{ .name = "zdt", .module = zdt_mod },
+            .{ .name = "c", .module = c_mod },
         },
     });
 
@@ -65,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/curl_multi_fetcher.zig"),
         .imports = &.{
             .{ .name = "types", .module = types_mod },
+            .{ .name = "c", .module = c_mod },
         },
     });
 
@@ -99,6 +112,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "types", .module = types_mod },
             .{ .name = "rss_reader", .module = rss_reader_mod },
+            .{ .name = "c", .module = c_mod },
         },
     });
 
@@ -112,6 +126,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Add module imports to executable
+    exe.root_module.addImport("c", c_mod);
     exe.root_module.addImport("zdt", zdt_mod);
     exe.root_module.addImport("types", types_mod);
     exe.root_module.addImport("config", config_mod);
@@ -124,8 +139,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("formatter", formatter_mod);
 
     // Link Expat to the executable
-    exe.linkLibrary(expat_dep.artifact("expat"));
-    exe.linkLibC();
+    exe.root_module.linkLibrary(expat_dep.artifact("expat"));
+    exe.root_module.link_libc = true;
 
     // Link libcurl for HTTP fetching (more robust than Zig's std.http.Client)
     // This requires libcurl dev headers to be installed on the system.
@@ -160,12 +175,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add zdt import to tests
+    // Add imports to tests
+    unit_tests.root_module.addImport("c", c_mod);
     unit_tests.root_module.addImport("zdt", zdt_mod);
 
     // Link Expat to tests as well
-    unit_tests.linkLibrary(expat_dep.artifact("expat"));
-    unit_tests.linkLibC();
+    unit_tests.root_module.linkLibrary(expat_dep.artifact("expat"));
+    unit_tests.root_module.link_libc = true;
 
     // Link curl with the same pattern as main executable
     // Requires libcurl dev headers. See README.md prerequisites.
@@ -187,8 +203,8 @@ pub fn build(b: *std.Build) void {
     suite_tests.root_module.addImport("formatter", formatter_mod);
     suite_tests.root_module.addImport("config", config_mod);
     suite_tests.root_module.addImport("zdt", zdt_mod);
-    suite_tests.linkLibrary(expat_dep.artifact("expat"));
-    suite_tests.linkLibC();
+    suite_tests.root_module.linkLibrary(expat_dep.artifact("expat"));
+    suite_tests.root_module.link_libc = true;
     linkCurl(suite_tests, curl_include_path, curl_lib_path);
 
     const run_suite_tests = b.addRunArtifact(suite_tests);
@@ -233,8 +249,8 @@ pub fn build(b: *std.Build) void {
     filesystem_tests.root_module.addImport("zdt", zdt_mod);
     filesystem_tests.root_module.addImport("daily_limiter", daily_limiter_mod);
     filesystem_tests.root_module.addImport("feed_group_manager", feed_group_manager_mod);
-    filesystem_tests.linkLibrary(expat_dep.artifact("expat"));
-    filesystem_tests.linkLibC();
+    filesystem_tests.root_module.linkLibrary(expat_dep.artifact("expat"));
+    filesystem_tests.root_module.link_libc = true;
     linkCurl(filesystem_tests, curl_include_path, curl_lib_path);
 
     const run_filesystem_tests = b.addRunArtifact(filesystem_tests);
@@ -251,8 +267,8 @@ pub fn build(b: *std.Build) void {
     });
     opml_tests.root_module.addImport("opml", opml_mod);
     opml_tests.root_module.addImport("types", types_mod);
-    opml_tests.linkLibrary(expat_dep.artifact("expat"));
-    opml_tests.linkLibC();
+    opml_tests.root_module.linkLibrary(expat_dep.artifact("expat"));
+    opml_tests.root_module.link_libc = true;
     linkCurl(opml_tests, curl_include_path, curl_lib_path);
 
     const run_opml_tests = b.addRunArtifact(opml_tests);
@@ -301,8 +317,8 @@ pub fn build(b: *std.Build) void {
     bench_exe.root_module.addImport("zdt", zdt_mod);
 
     // Link libraries
-    bench_exe.linkLibrary(expat_dep.artifact("expat"));
-    bench_exe.linkLibC();
+    bench_exe.root_module.linkLibrary(expat_dep.artifact("expat"));
+    bench_exe.root_module.link_libc = true;
     linkCurl(bench_exe, curl_include_path, curl_lib_path);
 
     b.installArtifact(bench_exe);
@@ -320,17 +336,17 @@ pub fn build(b: *std.Build) void {
 }
 
 fn linkCurl(exe: *std.Build.Step.Compile, include_path: ?[]const u8, lib_path: ?[]const u8) void {
-    exe.linkSystemLibrary("curl");
+    exe.root_module.linkSystemLibrary("curl", .{});
 
     if (include_path) |path| {
         // Paths should be absolute or relative to cwd where build is invoked
         // Use cwd_relative for both cases - it works correctly
-        exe.addIncludePath(.{ .cwd_relative = path });
+        exe.root_module.addIncludePath(.{ .cwd_relative = path });
     }
 
     if (lib_path) |path| {
         // Paths should be absolute or relative to cwd where build is invoked
         // Use cwd_relative for both cases - it works correctly
-        exe.addLibraryPath(.{ .cwd_relative = path });
+        exe.root_module.addLibraryPath(.{ .cwd_relative = path });
     }
 }

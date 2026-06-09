@@ -193,8 +193,7 @@ fn isFilePath(str: []const u8) bool {
 // ============================================================================
 
 test "parseGroupName identifies group before flags" {
-    const args = [_][]const u8{ "hys", "tech", "--add", "https://site.com" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech", "--add", "https://site.com" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -202,8 +201,7 @@ test "parseGroupName identifies group before flags" {
 }
 
 test "parseGroupName identifies group after flags" {
-    const args = [_][]const u8{ "hys", "--reset", "youtube" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--reset", "youtube" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -211,16 +209,14 @@ test "parseGroupName identifies group after flags" {
 }
 
 test "parseGroupName returns null when only URLs provided" {
-    const args = [_][]const u8{ "hys", "https://example.com/feed.xml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "https://example.com/feed.xml" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name == null);
 }
 
 test "parseGroupName skips URLs and finds group" {
-    const args = [_][]const u8{ "hys", "https://example.com/feed.xml", "tech", "http://another.com/rss" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "https://example.com/feed.xml", "tech", "http://another.com/rss" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -229,16 +225,14 @@ test "parseGroupName skips URLs and finds group" {
 
 test "parseGroupName rejects invalid group names with special characters" {
     // Group name with path separator should be rejected
-    const args = [_][]const u8{ "hys", "tech/news" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech/news" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name == null);
 }
 
 test "parseGroupName rejects group names with backslash" {
-    const args = [_][]const u8{ "hys", "tech\\news" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech\\news" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name == null);
@@ -246,16 +240,14 @@ test "parseGroupName rejects group names with backslash" {
 
 test "parseGroupName returns null for unknown flags" {
     // Unknown flag should cause null return, not be interpreted as group name
-    const args = [_][]const u8{ "hys", "--unknown-flag" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--unknown-flag" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name == null);
 }
 
 test "parseGroupName handles -day flag with value" {
-    const args = [_][]const u8{ "hys", "main", "-day", "-1" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "main", "-day", "-1" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -263,8 +255,7 @@ test "parseGroupName handles -day flag with value" {
 }
 
 test "parseGroupName skips OPML file paths" {
-    const args = [_][]const u8{ "hys", "/path/to/feeds.opml", "tech" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "/path/to/feeds.opml", "tech" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -272,8 +263,7 @@ test "parseGroupName skips OPML file paths" {
 }
 
 test "parseGroupName handles relative OPML path" {
-    const args = [_][]const u8{ "hys", "./feeds.opml", "mygroup" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "./feeds.opml", "mygroup" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -281,8 +271,7 @@ test "parseGroupName handles relative OPML path" {
 }
 
 test "parseGroupName returns null when only program name" {
-    const args = [_][]const u8{"hys"};
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{"hys"});
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name == null);
@@ -293,8 +282,7 @@ test "parseGroupName returns null when only program name" {
 // ============================================================================
 
 test "hasArg detects --help flag" {
-    const args = [_][]const u8{ "hys", "--help" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--help" });
 
     try std.testing.expect(parser.hasArg("--help"));
     try std.testing.expect(!parser.hasArg("-h"));
@@ -302,16 +290,14 @@ test "hasArg detects --help flag" {
 }
 
 test "hasArg detects short -h flag" {
-    const args = [_][]const u8{ "hys", "-h" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "-h" });
 
     try std.testing.expect(parser.hasArg("-h"));
     try std.testing.expect(!parser.hasArg("--help"));
 }
 
 test "hasArg detects multiple flags" {
-    const args = [_][]const u8{ "hys", "--reset", "--no-pager", "tech" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--reset", "--no-pager", "tech" });
 
     try std.testing.expect(parser.hasArg("--reset"));
     try std.testing.expect(parser.hasArg("--no-pager"));
@@ -319,8 +305,7 @@ test "hasArg detects multiple flags" {
 }
 
 test "hasArg returns false for non-existent flag" {
-    const args = [_][]const u8{ "hys", "tech" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech" });
 
     try std.testing.expect(!parser.hasArg("--help"));
     try std.testing.expect(!parser.hasArg("--reset"));
@@ -331,8 +316,7 @@ test "hasArg returns false for non-existent flag" {
 // ============================================================================
 
 test "getArgValue extracts --add value" {
-    const args = [_][]const u8{ "hys", "--add", "https://example.com/feed.xml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--add", "https://example.com/feed.xml" });
 
     const value = parser.getArgValue("--add");
     try std.testing.expect(value != null);
@@ -340,8 +324,7 @@ test "getArgValue extracts --add value" {
 }
 
 test "getArgValue extracts --export value" {
-    const args = [_][]const u8{ "hys", "tech", "--export", "/tmp/export.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech", "--export", "/tmp/export.opml" });
 
     const value = parser.getArgValue("--export");
     try std.testing.expect(value != null);
@@ -349,8 +332,7 @@ test "getArgValue extracts --export value" {
 }
 
 test "getArgValue extracts -day value" {
-    const args = [_][]const u8{ "hys", "main", "-day", "-2" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "main", "-day", "-2" });
 
     const value = parser.getArgValue("-day");
     try std.testing.expect(value != null);
@@ -358,16 +340,14 @@ test "getArgValue extracts -day value" {
 }
 
 test "getArgValue returns null when flag has no value" {
-    const args = [_][]const u8{ "hys", "--add" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--add" });
 
     const value = parser.getArgValue("--add");
     try std.testing.expect(value == null);
 }
 
 test "getArgValue returns null for non-existent flag" {
-    const args = [_][]const u8{ "hys", "tech" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech" });
 
     const value = parser.getArgValue("--add");
     try std.testing.expect(value == null);
@@ -378,8 +358,7 @@ test "getArgValue returns null for non-existent flag" {
 // ============================================================================
 
 test "getOpmlFilePath detects absolute path" {
-    const args = [_][]const u8{ "hys", "/Users/test/feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "/Users/test/feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -387,8 +366,7 @@ test "getOpmlFilePath detects absolute path" {
 }
 
 test "getOpmlFilePath detects relative path with ./" {
-    const args = [_][]const u8{ "hys", "./my_feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "./my_feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -396,8 +374,7 @@ test "getOpmlFilePath detects relative path with ./" {
 }
 
 test "getOpmlFilePath detects home-relative path" {
-    const args = [_][]const u8{ "hys", "~/Documents/feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "~/Documents/feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -405,8 +382,7 @@ test "getOpmlFilePath detects home-relative path" {
 }
 
 test "getOpmlFilePath detects .opml extension without path prefix" {
-    const args = [_][]const u8{ "hys", "feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -414,16 +390,14 @@ test "getOpmlFilePath detects .opml extension without path prefix" {
 }
 
 test "getOpmlFilePath returns null when no OPML file" {
-    const args = [_][]const u8{ "hys", "tech", "--add", "https://example.com" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech", "--add", "https://example.com" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path == null);
 }
 
 test "getOpmlFilePath skips URLs" {
-    const args = [_][]const u8{ "hys", "https://example.com/feed.xml", "/path/to/feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "https://example.com/feed.xml", "/path/to/feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -431,8 +405,7 @@ test "getOpmlFilePath skips URLs" {
 }
 
 test "getOpmlFilePath skips flags" {
-    const args = [_][]const u8{ "hys", "--reset", "feeds.opml" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--reset", "feeds.opml" });
 
     const path = parser.getOpmlFilePath();
     try std.testing.expect(path != null);
@@ -498,8 +471,7 @@ test "isFilePath rejects non-file strings" {
 // ============================================================================
 
 test "parseGroupName with empty args" {
-    const args = [_][]const u8{};
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{});
 
     // Should not crash, just return null
     const group_name = parser.parseGroupName();
@@ -507,8 +479,7 @@ test "parseGroupName with empty args" {
 }
 
 test "parseGroupName with unicode group name" {
-    const args = [_][]const u8{ "hys", "日本語" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "日本語" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -516,8 +487,7 @@ test "parseGroupName with unicode group name" {
 }
 
 test "parseGroupName with emoji group name" {
-    const args = [_][]const u8{ "hys", "🚀news" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "🚀news" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -525,8 +495,7 @@ test "parseGroupName with emoji group name" {
 }
 
 test "complex command with multiple features" {
-    const args = [_][]const u8{ "hys", "tech", "--add", "https://news.ycombinator.com/rss", "--name", "Hacker News" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech", "--add", "https://news.ycombinator.com/rss", "--name", "Hacker News" });
 
     try std.testing.expect(parser.hasArg("--add"));
     try std.testing.expect(parser.hasArg("--name"));
@@ -546,8 +515,7 @@ test "complex command with multiple features" {
 
 test "--sub without group should not treat feed name as group" {
     // Bug fix: hys --sub "https://site.com/feed" "Title" should NOT treat "Title" as a group
-    const args = [_][]const u8{ "hys", "--sub", "https://site.com/feed", "Title" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--sub", "https://site.com/feed", "Title" });
 
     const group_name = parser.parseGroupName();
     // Should be null since "Title" is the feed name, not a group name
@@ -557,8 +525,7 @@ test "--sub without group should not treat feed name as group" {
 test "--sub with group should handle feed name correctly" {
     // hys Group --sub "address.com/feed" "Title"
     // Should identify Group as the group name and "Title" as the feed name (skipped)
-    const args = [_][]const u8{ "hys", "Group", "--sub", "https://address.com/feed", "Title" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "Group", "--sub", "https://address.com/feed", "Title" });
 
     const group_name = parser.parseGroupName();
     try std.testing.expect(group_name != null);
@@ -570,37 +537,32 @@ test "--sub with group should handle feed name correctly" {
 // ============================================================================
 
 test "hasArg detects --json flag" {
-    const args = [_][]const u8{ "hys", "--json" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--json" });
 
     try std.testing.expect(parser.hasArg("--json"));
 }
 
 test "hasArg detects -j short flag" {
-    const args = [_][]const u8{ "hys", "-j" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "-j" });
 
     try std.testing.expect(parser.hasArg("-j"));
 }
 
 test "--json with group name" {
-    const args = [_][]const u8{ "hys", "tech", "--json" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "tech", "--json" });
 
     try std.testing.expect(parser.hasArg("--json"));
 }
 
 test "-j with --all flag" {
-    const args = [_][]const u8{ "hys", "--all", "-j" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "--all", "-j" });
 
     try std.testing.expect(parser.hasArg("-j"));
     try std.testing.expect(parser.hasArg("--all"));
 }
 
 test "--json does not interfere with group name parsing" {
-    const args = [_][]const u8{ "hys", "news", "--json" };
-    const parser = MockCliParser.init(std.testing.allocator, &args);
+    const parser = MockCliParser.init(std.testing.allocator, &.{ "hys", "news", "--json" });
 
     try std.testing.expect(parser.hasArg("--json"));
     // Note: parseGroupName won't work here because --json isn't in the mock's valid_flags

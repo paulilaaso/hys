@@ -7,8 +7,8 @@
             .hash = "libexpat-2.7.1-1-y_akI-w7AABhqRN54g--MNNIR-zA1X2WZ36ZPriY84sb",
         },
         .zdt = .{
-            .url = "git+https://codeberg.org/FObersteiner/zdt.git#514658c852d2026b1acf2c7975d35eea3dba423e",
-            .hash = "zdt-0.8.1-xr0_vAxUDwCJRDh9pcAS_mdZBIsvcGTtN-K8JJSWY4I6",
+            .url = "git+https://codeberg.org/FObersteiner/zdt.git?ref=v0.9.4#650f57f4749cf4ec0718f2ff81b229596201a894",
+            .hash = "zdt-0.9.4-xr0_vJTaEQAq-crEean1EPItDfn0wIBKqp2pkWhvUtbx",
         },
     },
     .paths = .{""},

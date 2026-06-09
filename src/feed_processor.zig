@@ -165,17 +165,18 @@ pub const FeedTaskResult = struct {
 
 pub const FeedProcessor = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     max_feed_size_mb: f64,
-    // For streaming pipeline: thread pool and wait group
-    pool: ?*std.Thread.Pool = null,
-    wg: ?*std.Thread.WaitGroup = null,
+    // For streaming pipeline: std.Io task group for parse work
+    group: ?*std.Io.Group = null,
     results: ?[]FeedTaskResult = null,
     // ADD: Reference to seen map
     seen_map: ?*const std.AutoHashMap(u64, void) = null,
 
-    pub fn init(allocator: std.mem.Allocator, max_feed_size_mb: f64) FeedProcessor {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, max_feed_size_mb: f64) FeedProcessor {
         return FeedProcessor{
             .allocator = allocator,
+            .io = io,
             .max_feed_size_mb = max_feed_size_mb,
         };
     }
@@ -205,22 +206,15 @@ pub const FeedProcessor = struct {
         }
 
         // Spawn parse task immediately while network is still fetching other feeds
-        if (self.pool) |pool| {
-            if (self.wg) |wg| {
-                wg.start();
-                const xml_copy = xml_data.?;
-                pool.spawn(parseTask, .{
-                    self.allocator,
-                    xml_copy,
-                    &task_results[index],
-                    wg,
-                    self.max_feed_size_mb,
-                    self.seen_map,
-                }) catch |err| {
-                    wg.finish();
-                    task_results[index].err = err;
-                };
-            }
+        if (self.group) |group| {
+            const xml_copy = xml_data.?;
+            group.async(self.io, parseTask, .{
+                self.allocator,
+                xml_copy,
+                &task_results[index],
+                self.max_feed_size_mb,
+                self.seen_map,
+            });
         }
     }
 
@@ -241,16 +235,12 @@ pub const FeedProcessor = struct {
         }
         errdefer self.allocator.free(results);
 
-        // Initialize thread pool for parsing
-        var pool: std.Thread.Pool = undefined;
-        try pool.init(.{ .allocator = self.allocator });
-        defer pool.deinit();
-
-        var wg: std.Thread.WaitGroup = .{};
+        // Initialize task group for parsing
+        var group: std.Io.Group = .init;
+        defer group.cancel(self.io);
 
         // Setup streaming pipeline state
-        self.pool = &pool;
-        self.wg = &wg;
+        self.group = &group;
         self.results = results;
 
         // Batch fetch with callback - parses start immediately as downloads complete
@@ -262,10 +252,8 @@ pub const FeedProcessor = struct {
             @as(*anyopaque, @ptrCast(self)),
         );
 
-        // pool.waitAndWork() acquires a release barrier from all worker threads
-        // via WaitGroup.finish() using .acq_rel atomic semantics, ensuring all
-        // writes to results[] from parser threads are visible before proceeding
-        pool.waitAndWork(&wg);
+        // Wait for all parser tasks to complete before reading results.
+        try group.await(self.io);
 
         // Free fetch buffers AFTER all parser threads finish
         for (fetch_results) |*fr| {
@@ -274,8 +262,7 @@ pub const FeedProcessor = struct {
         self.allocator.free(fetch_results);
 
         // Clear streaming state
-        self.pool = null;
-        self.wg = null;
+        self.group = null;
         self.results = null;
 
         return results;
@@ -283,8 +270,9 @@ pub const FeedProcessor = struct {
 
     pub fn processResults(
         self: *FeedProcessor,
+        arena_allocator: std.mem.Allocator,
         results: []FeedTaskResult,
-        original_feeds: []types.FeedConfig, // Remove const to allow header updates
+        original_feeds: []types.FeedConfig,
         group_names: []const []const u8,
         group_display_names: []const ?[]const u8,
         display_manager: *DisplayManager.DisplayManager,
@@ -295,40 +283,28 @@ pub const FeedProcessor = struct {
         preserve_group_order: bool,
         cutoff_timestamp: i64,
     ) !std.array_list.Managed(types.RssItem) {
-        // Prevent index alignment bugs between results and original_feeds arrays
         std.debug.assert(results.len == original_feeds.len);
 
         var all_items = std.array_list.Managed(types.RssItem).init(self.allocator);
-        errdefer {
-            for (all_items.items) |item| {
-                item.deinit(self.allocator);
-            }
-            all_items.deinit();
-        }
+        errdefer all_items.deinit();
 
         for (results, 0..) |task_result, idx| {
-            const original_feed = &original_feeds[idx]; // Make mutable reference
+            const original_feed = &original_feeds[idx];
             var parsed_feed = task_result.parsed;
 
-            // Clean up parsed_feed (only owned resource from task_result)
             defer if (parsed_feed) |*pf| pf.deinit();
 
-            // Update feed headers if we got new ones (for all successful responses)
             if (task_result.new_etag) |new_etag| {
-                if (original_feed.etag) |old_etag| self.allocator.free(old_etag);
-                original_feed.etag = try self.allocator.dupe(u8, new_etag);
+                original_feed.etag = try arena_allocator.dupe(u8, new_etag);
                 self.allocator.free(new_etag);
             }
             if (task_result.new_last_modified) |new_lastmod| {
-                if (original_feed.lastModified) |old_lastmod| self.allocator.free(old_lastmod);
-                original_feed.lastModified = try self.allocator.dupe(u8, new_lastmod);
+                original_feed.lastModified = try arena_allocator.dupe(u8, new_lastmod);
                 self.allocator.free(new_lastmod);
             }
 
-            // Handle 304 Not Modified - feed hasn't changed
             if (task_result.status == .NotModified) {
                 const feed_name = original_feed.text orelse original_feed.xmlUrl;
-                // Always show feed header for unchanged feeds
                 if (display_manager.output_buffer == null) {
                     display_manager.printFeedHeader(feed_name);
                     display_manager.printInfo("Feed unchanged (304 Not Modified)");
@@ -337,10 +313,8 @@ pub const FeedProcessor = struct {
             }
 
             if (task_result.err) |err| {
-                // Use the original feed for error reporting
                 const fallback_name = original_feed.text orelse original_feed.xmlUrl;
-                
-                // Capture detailed error message
+
                 var error_msg_buf: [256]u8 = undefined;
                 const error_msg = switch (err) {
                     error.CurlFailed => "Curl request failed (network/DNS/TLS issue)",
@@ -363,41 +337,36 @@ pub const FeedProcessor = struct {
                         break :blk msg;
                     },
                 };
-                
-                // Only print error immediately if not buffering for pager
+
                 if (display_manager.output_buffer == null and !display_manager.use_pager_streaming) {
                     display_manager.printFeedHeader(fallback_name);
                     var display_buf: [512]u8 = undefined;
                     const display_msg = try std.fmt.bufPrint(&display_buf, "Failed to read feed: {s}", .{error_msg});
                     display_manager.printError(display_msg);
                 }
-                
-                // Store error message with feed for summary output
+
                 const error_with_reason = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{fallback_name, error_msg});
                 try failed_feeds.append(error_with_reason);
                 continue;
             }
 
-            // At this point, parsed_feed must be non-null (no error occurred)
             const pf = parsed_feed orelse unreachable;
-            const f = original_feed.*; // Dereference the mutable reference
+            const f = original_feed.*;
 
-            // Determine display name
             const display_name = if (f.text) |text| blk: {
-                if (std.mem.indexOf(u8, text, " (")) |paren_idx| {
-                    const name = try self.allocator.dupe(u8, text[0..paren_idx]);
+                if (std.mem.find(u8, text, " (")) |paren_idx| {
+                    const name = try arena_allocator.dupe(u8, text[0..paren_idx]);
                     break :blk name;
                 }
-                const name = try self.allocator.dupe(u8, text);
+                const name = try arena_allocator.dupe(u8, text);
                 break :blk name;
             } else if (pf.title) |title| blk: {
-                const name = try self.allocator.dupe(u8, title);
+                const name = try arena_allocator.dupe(u8, title);
                 break :blk name;
             } else blk: {
-                const name = try self.allocator.dupe(u8, f.xmlUrl);
+                const name = try arena_allocator.dupe(u8, f.xmlUrl);
                 break :blk name;
             };
-            errdefer self.allocator.free(display_name);
 
             var new_items = std.array_list.Managed(types.RssItem).init(self.allocator);
             defer new_items.deinit();
@@ -436,14 +405,17 @@ pub const FeedProcessor = struct {
                     }
                 }
 
-                var item_copy = try item.clone(self.allocator);
-                errdefer item_copy.deinit(self.allocator);
-
-                item_copy.feedName = try self.allocator.dupe(u8, display_name);
-                item_copy.groupName = try self.allocator.dupe(u8, group_names[idx]);
-                if (group_display_names[idx]) |gdn| {
-                    item_copy.groupDisplayName = try self.allocator.dupe(u8, gdn);
-                }
+                const item_copy = types.RssItem{
+                    .title = if (item.title) |t| try arena_allocator.dupe(u8, t) else null,
+                    .description = if (item.description) |d| try arena_allocator.dupe(u8, d) else null,
+                    .link = if (item.link) |l| try arena_allocator.dupe(u8, l) else null,
+                    .pubDate = if (item.pubDate) |p| try arena_allocator.dupe(u8, p) else null,
+                    .timestamp = item.timestamp,
+                    .guid = if (item.guid) |g| try arena_allocator.dupe(u8, g) else null,
+                    .feedName = try arena_allocator.dupe(u8, display_name),
+                    .groupName = try arena_allocator.dupe(u8, group_names[idx]),
+                    .groupDisplayName = if (group_display_names[idx]) |gdn| try arena_allocator.dupe(u8, gdn) else null,
+                };
                 try new_items.append(item_copy);
             }
 
@@ -453,15 +425,11 @@ pub const FeedProcessor = struct {
                 display_manager.printFeedItems(new_items.items);
             }
 
-            // FIX: Ensure capacity for the new batch to avoid multiple reallocations
             try all_items.ensureUnusedCapacity(new_items.items.len);
 
             for (new_items.items) |item| {
-                // appendAssumeCapacity is faster when we know we have space
                 all_items.appendAssumeCapacity(item);
             }
-
-            self.allocator.free(display_name);
         }
 
         // Sort all collected items using grouped logic
@@ -495,19 +463,16 @@ pub const FeedProcessor = struct {
     }
 };
 
-/// Parse XML data into a feed (runs in thread pool)
+/// Parse XML data into a feed (runs in std.Io.Group)
 /// IMPORTANT: No ownership of feed config is transferred; only XML data and result are passed
 /// NOTE: parent_allocator is thread-safe (GeneralPurposeAllocator with bucket locking in debug, malloc in release)
 fn parseTask(
     parent_allocator: std.mem.Allocator,
     xml_data: []const u8,
     result: *FeedTaskResult,
-    wg: *std.Thread.WaitGroup,
     max_feed_size_mb: f64,
     seen_map: ?*const std.AutoHashMap(u64, void), // Add arg
 ) void {
-    defer wg.finish();
-
     // Initialize RssReader for parsing only
     var reader = RssReader.initWithMaxSize(parent_allocator, max_feed_size_mb);
     defer reader.deinit();

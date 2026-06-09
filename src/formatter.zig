@@ -40,7 +40,7 @@ pub fn getCodepointDisplayWidth(cp: u21) usize {
 
 /// Escapes a string for safe JSON output, stripping ANSI escape sequences.
 /// Handles malformed ANSI sequences safely without buffer overruns.
-pub fn writeJsonEscaped(writer: std.io.AnyWriter, str: []const u8) !void {
+pub fn writeJsonEscaped(buffer: *std.array_list.Managed(u8), str: []const u8) !void {
     var i: usize = 0;
     while (i < str.len) {
         const c = str[i];
@@ -71,13 +71,13 @@ pub fn writeJsonEscaped(writer: std.io.AnyWriter, str: []const u8) !void {
             }
         }
         switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{c}),
-            else => try writer.writeByte(c),
+            '"' => try buffer.appendSlice("\\\""),
+            '\\' => try buffer.appendSlice("\\\\"),
+            '\n' => try buffer.appendSlice("\\n"),
+            '\r' => try buffer.appendSlice("\\r"),
+            '\t' => try buffer.appendSlice("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try buffer.print("\\u{x:0>4}", .{c}),
+            else => try buffer.append(c),
         }
         i += 1;
     }
@@ -85,45 +85,59 @@ pub fn writeJsonEscaped(writer: std.io.AnyWriter, str: []const u8) !void {
 
 pub const Formatter = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
     display_config: types.DisplayConfig,
     buffer: ?*std.array_list.Managed(u8) = null,
     terminal_width: usize = 80,
-    pager_stdin: ?std.fs.File = null,
+    pager_stdin: ?std.Io.File = null,
     writer: ?std.Io.Writer = null,
 
-    pub fn init(allocator: std.mem.Allocator, display_config: types.DisplayConfig) Formatter {
-        return Formatter{
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, display_config: types.DisplayConfig) Formatter {
+        var fmt = Formatter{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
             .display_config = display_config,
-            .terminal_width = getTerminalWidthUncached(),
         };
+        fmt.terminal_width = fmt.getTerminalWidthUncached();
+        return fmt;
     }
 
-    pub fn initDirect(allocator: std.mem.Allocator, display_config: types.DisplayConfig, writer: std.Io.Writer) Formatter {
-        return Formatter{
+    pub fn initDirect(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, display_config: types.DisplayConfig, writer: std.Io.Writer) Formatter {
+        var fmt = Formatter{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
             .display_config = display_config,
-            .terminal_width = getTerminalWidthUncached(),
             .writer = writer,
         };
+        fmt.terminal_width = fmt.getTerminalWidthUncached();
+        return fmt;
     }
 
-    pub fn initWithBuffer(allocator: std.mem.Allocator, display_config: types.DisplayConfig, buffer: *std.array_list.Managed(u8)) Formatter {
-        return Formatter{
+    pub fn initWithBuffer(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, display_config: types.DisplayConfig, buffer: *std.array_list.Managed(u8)) Formatter {
+        var fmt = Formatter{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
             .display_config = display_config,
             .buffer = buffer,
-            .terminal_width = getTerminalWidthUncached(),
         };
+        fmt.terminal_width = fmt.getTerminalWidthUncached();
+        return fmt;
     }
 
-    pub fn initWithPagerStdin(allocator: std.mem.Allocator, display_config: types.DisplayConfig, pager_stdin: ?std.fs.File) Formatter {
-        return Formatter{
+    pub fn initWithPagerStdin(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, display_config: types.DisplayConfig, pager_stdin: ?std.Io.File) Formatter {
+        var fmt = Formatter{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
             .display_config = display_config,
             .pager_stdin = pager_stdin,
-            .terminal_width = getTerminalWidthUncached(),
         };
+        fmt.terminal_width = fmt.getTerminalWidthUncached();
+        return fmt;
     }
 
     fn getTermWidth(self: *Formatter) usize {
@@ -137,12 +151,12 @@ pub const Formatter = struct {
     fn writeOutput(self: *Formatter, text: []const u8) void {
         if (self.pager_stdin) |stdin| {
             // Streaming mode: write directly to pager
-            stdin.writeAll(text) catch |err| {
+            stdin.writeStreamingAll(self.io, text) catch |err| {
                 if (err != error.BrokenPipe) {
                     if (self.writer) |w| {
                         @constCast(&w).writeAll(text) catch return;
                     } else {
-                        std.fs.File.stdout().writeAll(text) catch return;
+                        std.Io.File.stdout().writeStreamingAll(self.io, text) catch return;
                     }
                 }
                 // If BrokenPipe (user quit less), just silently discard
@@ -152,7 +166,7 @@ pub const Formatter = struct {
                 if (self.writer) |w| {
                     @constCast(&w).writeAll(text) catch return;
                 } else {
-                    std.fs.File.stdout().writeAll(text) catch return;
+                    std.Io.File.stdout().writeStreamingAll(self.io, text) catch return;
                 }
             };
         } else if (self.writer) |w| {
@@ -160,7 +174,7 @@ pub const Formatter = struct {
             @constCast(&w).writeAll(text) catch return;
         } else {
             // Fallback only if no writer provided (shouldn't happen with correct init)
-            std.fs.File.stdout().writeAll(text) catch return;
+            std.Io.File.stdout().writeStreamingAll(self.io, text) catch return;
         }
     }
 
@@ -173,7 +187,7 @@ pub const Formatter = struct {
             };
             defer self.allocator.free(formatted);
 
-            stdin.writeAll(formatted) catch |err| {
+            stdin.writeStreamingAll(self.io, formatted) catch |err| {
                 if (err != error.BrokenPipe) {
                     if (self.writer) |w| {
                         {
@@ -193,7 +207,7 @@ pub const Formatter = struct {
                 // If BrokenPipe (user quit less), just silently discard
             };
         } else if (self.buffer) |buf| {
-            std.fmt.format(buf.writer(), fmt, args) catch {
+            buf.print(fmt, args) catch {
                 // Fallback to debug print if buffer write fails
                 if (self.writer) |w| {
                     {
@@ -228,9 +242,9 @@ pub const Formatter = struct {
     }
 
     /// Get the current terminal width without caching, with fallback to 80 if detection fails
-    fn getTerminalWidthUncached() usize {
-        // 1) Environment variable first (works across OSes)
-        if (std.posix.getenv("COLUMNS")) |cols_str| {
+    fn getTerminalWidthUncached(self: *Formatter) usize {
+        // 1) Environment variable support
+        if (self.environ_map.get("COLUMNS")) |cols_str| {
             if (std.fmt.parseInt(usize, cols_str, 10) catch null) |cols| {
                 if (cols > 10 and cols < 1000) return cols;
             }
@@ -248,27 +262,22 @@ pub const Formatter = struct {
             return 80;
         }
 
-        // 3) POSIX implementation using ioctl on stdout, then stderr as fallback
-        const stdout = std.fs.File.stdout();
-        if (std.posix.isatty(stdout.handle)) {
-            var winsize: std.posix.winsize = undefined;
-            const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
-            if (result == 0 and winsize.col > 0) {
-                return @intCast(winsize.col);
-            }
-        } else {
-            const stderr = std.fs.File.stderr();
-            if (std.posix.isatty(stderr.handle)) {
-                var winsize: std.posix.winsize = undefined;
-                const result = std.posix.system.ioctl(stderr.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
-                if (result == 0 and winsize.col > 0) {
-                    return @intCast(winsize.col);
+        // 3) POSIX implementation using ioctl
+        if (builtin.os.tag != .windows) {
+            const stdout_is_tty = std.Io.File.stdout().isTty(self.io) catch false;
+            const stderr_is_tty = std.Io.File.stderr().isTty(self.io) catch false;
+            const fd: ?i32 = if (stdout_is_tty) 1 else if (stderr_is_tty) 2 else null;
+            if (fd) |f| {
+                var ws: std.posix.winsize = undefined;
+                const rc = std.c.ioctl(f, std.c.T.IOCGWINSZ, &ws);
+                if (rc == 0 and ws.col > 0) {
+                    return @intCast(ws.col);
                 }
             }
         }
 
-        // 4) Default fallback: use 0 for piped output to indicate no wrapping
-        return 0;
+        // 4) Default fallback (never return 0, as 0 breaks the word wrapper math completely!)
+        return 80;
     }
 
     pub fn printHeader(self: *Formatter, title: []const u8) void {
@@ -294,7 +303,7 @@ pub const Formatter = struct {
         const date_str = if (days_ago) |da|
             getDaysAgoString(self.allocator, da) catch "Unknown Date"
         else
-            getRelativeOrFormattedDateWithAlloc(self.allocator, timestamp, self.display_config.dateFormat) catch "Unknown Date";
+            getRelativeOrFormattedDateWithAlloc(self.allocator, self.io, timestamp, self.display_config.dateFormat) catch "Unknown Date";
         defer if (date_str.ptr != "Unknown Date".ptr) self.allocator.free(date_str);
 
         self.writeOutput(config.COLORS.BOLD ++ config.COLORS.CYAN);
@@ -414,7 +423,7 @@ pub const Formatter = struct {
 
             // Try relative time first
             if (item.timestamp > 0) {
-                if (getRelativeTimeWithAlloc(temp_alloc, item.timestamp)) |rel| {
+                if (getRelativeTimeWithAlloc(temp_alloc, self.io, item.timestamp)) |rel| {
                     date_display = rel;
                 } else |_| {
                     // Fallback to raw string if allocation fails
@@ -580,7 +589,7 @@ pub const Formatter = struct {
         var arena: ?std.heap.ArenaAllocator = null;
         defer if (arena) |*a| a.deinit();
 
-        if (std.mem.indexOf(u8, text, "\u{3000}") != null) {
+        if (std.mem.find(u8, text, "\u{3000}") != null) {
             var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
             if (temp_arena.allocator().dupe(u8, text)) |buf| {
                 arena = temp_arena;
@@ -782,13 +791,13 @@ pub const Formatter = struct {
     }
 
     fn getRelativeTime(self: *Formatter, timestamp: i64) ![]u8 {
-        return getRelativeTimeWithAlloc(self.allocator, timestamp);
+        return getRelativeTimeWithAlloc(self.allocator, self.io, timestamp);
     }
 
-    fn getRelativeTimeWithAlloc(alloc: std.mem.Allocator, timestamp: i64) ![]u8 {
+    fn getRelativeTimeWithAlloc(alloc: std.mem.Allocator, io: std.Io, timestamp: i64) ![]u8 {
         if (timestamp == 0) return alloc.dupe(u8, "");
 
-        const now = std.time.timestamp();
+        const now = std.Io.Timestamp.now(io, .real).toSeconds();
         // Handle future dates or clock skew
         if (timestamp > now) return alloc.dupe(u8, "just now");
 
@@ -826,10 +835,10 @@ pub const Formatter = struct {
     }
 
     /// Get relative time for recent dates (today, 1 day ago, etc), or formatted date for older ones
-    fn getRelativeOrFormattedDateWithAlloc(alloc: std.mem.Allocator, timestamp: i64, date_format: []const u8) ![]u8 {
+    fn getRelativeOrFormattedDateWithAlloc(alloc: std.mem.Allocator, io: std.Io, timestamp: i64, date_format: []const u8) ![]u8 {
         if (timestamp == 0) return alloc.dupe(u8, "Unknown Date");
 
-        const now = std.time.timestamp();
+        const now = std.Io.Timestamp.now(io, .real).toSeconds();
         // Handle future dates or clock skew
         if (timestamp > now) return alloc.dupe(u8, "today");
 
@@ -860,23 +869,23 @@ pub const Formatter = struct {
                     switch (date_format[i + 1]) {
                         'm' => {
                             // Month (01-12)
-                            try result.writer().print("{d:0>2}", .{month_day.month.numeric()});
+                            try result.print("{d:0>2}", .{month_day.month.numeric()});
                             i += 2;
                         },
                         'd' => {
                             // Day (01-31)
-                            try result.writer().print("{d:0>2}", .{month_day.day_index + 1});
+                            try result.print("{d:0>2}", .{month_day.day_index + 1});
                             i += 2;
                         },
                         'Y' => {
                             // Year (4 digits)
-                            try result.writer().print("{d:0>4}", .{year_day.year});
+                            try result.print("{d:0>4}", .{year_day.year});
                             i += 2;
                         },
                         'y' => {
                             // Year (2 digits)
                             const year_2digit = @as(u16, @truncate(@as(u32, @intCast(year_day.year)) % 100));
-                            try result.writer().print("{d:0>2}", .{year_2digit});
+                            try result.print("{d:0>2}", .{year_2digit});
                             i += 2;
                         },
                         '%' => {

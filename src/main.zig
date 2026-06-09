@@ -12,9 +12,7 @@ const FeedProcessor = @import("feed_processor").FeedProcessor;
 const DisplayManager = @import("display_manager").DisplayManager;
 const formatter = @import("formatter");
 
-const curl = @cImport({
-    @cInclude("curl/curl.h");
-});
+const curl = @import("c");
 
 /// Helper function to check for a flag by both long and short names
 fn hasAnyArg(cli: CliParser, long_name: []const u8, short_name: []const u8) bool {
@@ -32,7 +30,7 @@ fn tryHandleJsonOutput(
     cli: CliParser,
     items: []const types.RssItem,
     failed_feeds: []const []const u8,
-    stdout: *std.io.Writer,
+    stdout: *std.Io.Writer,
 ) !bool {
     if (hasAnyArg(cli, "--json", "-j")) {
         try outputJson(allocator, items, failed_feeds, stdout);
@@ -41,7 +39,7 @@ fn tryHandleJsonOutput(
     return false;
 }
 
-fn runLoadingAnimation(is_loading: *std.atomic.Value(bool), feed_count: usize, stdout: *std.io.Writer) void {
+fn runLoadingAnimation(io: std.Io, is_loading: *std.atomic.Value(bool), feed_count: usize, stdout: *std.Io.Writer) void {
     var frame_index: usize = 0;
     while (is_loading.load(.acquire)) {
         const braille_frame = config.BRAILLE_ANIMATION[frame_index % config.BRAILLE_ANIMATION.len];
@@ -55,11 +53,11 @@ fn runLoadingAnimation(is_loading: *std.atomic.Value(bool), feed_count: usize, s
         }) catch {};
         stdout.flush() catch {};
         frame_index += 1;
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .real) catch {};
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Windows ANSI fix
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
@@ -82,29 +80,26 @@ pub fn main() !void {
     defer curl.curl_global_cleanup();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_state = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_state = std.Io.File.stdout().writer(init.io, &stdout_buf);
     const stdout = &stdout_state.interface;
 
-    defer stdout.flush() catch {};
+    defer stdout_state.flush() catch {};
 
-    // Use GPA in debug builds to detect memory leaks, fallback to C allocator otherwise
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // Explicitly check for .leak
-    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
-    defer if (builtin.mode == .Debug) {
-        const check = gpa.deinit();
-        if (check == .leak) {
-            std.log.err("Memory leak detected!", .{});
-        }
-    };
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    try runApp(allocator, args, stdout);
+    const home_dir = init.environ_map.get("HOME") orelse init.environ_map.get("USERPROFILE") orelse ".";
+
+    try runApp(allocator, init.io, init.environ_map, home_dir, args, stdout);
 }
 
-fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) !void {
+fn runApp(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, home_dir: []const u8, args: []const [:0]const u8, stdout: *std.Io.Writer) !void {
+    // Arena for all long-lived data — everything is freed at function exit
+    var results_arena = std.heap.ArenaAllocator.init(allocator);
+    defer results_arena.deinit();
+    const arena_allocator = results_arena.allocator();
+
     var cli = CliParser.init(allocator, args);
 
     if (cli.hasArg("--version") or cli.hasArg("-v")) {
@@ -117,7 +112,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         return;
     }
 
-    var config_manager = try ConfigManager.init(allocator);
+    var config_manager = try ConfigManager.init(allocator, io, home_dir);
     defer config_manager.deinit();
 
     // Handle config flag (shows config file location)
@@ -208,7 +203,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     }
 
     // Initialize the primary limiter using the first group (used for global operations like seen hashes)
-    var limiter = try DailyLimiter.init(allocator, primary_group_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+    var limiter = try DailyLimiter.init(allocator, io, home_dir, primary_group_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
     defer limiter.deinit();
 
     var reader = RssReader.init(allocator);
@@ -217,7 +212,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     if (hasAnyArg(cli, "--reset", "-r")) {
         // Reset for ALL specified groups
         for (group_names) |g_name| {
-            var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+            var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
             defer group_limiter.deinit();
             group_limiter.reset() catch |err| {
                 try stdout.print("Failed to reset daily limitation for group '{s}'\n", .{g_name});
@@ -226,23 +221,16 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
             };
 
             // Also clear etags and lastModified headers from feeds in this group
-            var group = config_manager.loadGroupWithMetadata(g_name) catch |err| {
+            const group = config_manager.loadGroupWithMetadata(arena_allocator, g_name) catch |err| {
                 try stdout.print("Warning: Failed to load group '{s}' for etag clearing: {}\n", .{ g_name, err });
                 try stdout.print("Daily limitation reset for group '{s}'.\n", .{g_name});
                 continue;
             };
-            defer group.deinit(allocator);
 
             // Clear etags and lastModified from all feeds
             for (group.feeds) |*feed| {
-                if (feed.etag) |etag| {
-                    allocator.free(etag);
-                    feed.etag = null;
-                }
-                if (feed.lastModified) |last_mod| {
-                    allocator.free(last_mod);
-                    feed.lastModified = null;
-                }
+                feed.etag = null;
+                feed.lastModified = null;
             }
 
             // Save the updated group with cleared etags
@@ -255,7 +243,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         return;
     }
 
-    var display_manager = try DisplayManager.init(allocator, global_config.display, stdout);
+    var display_manager = try DisplayManager.init(allocator, io, environ_map, global_config.display, stdout);
     defer display_manager.deinit();
     defer display_manager.flush() catch {};
     // Handle --sub: Subscribe to a feed URL or import OPML file to the current group
@@ -278,7 +266,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
 
         if (is_opml) {
             // Import OPML file/URL to the current group
-            var opml = OpmlManager.init(allocator);
+            var opml = OpmlManager.init(allocator, io);
             defer opml.deinit();
 
             const added_count = opml.importToGroup(input, group_name, &config_manager.feed_group_manager) catch |err| {
@@ -393,7 +381,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
             return;
         };
 
-        var opml = OpmlManager.init(allocator);
+        var opml = OpmlManager.init(allocator, io);
         defer opml.deinit();
 
         const added_count = opml.importToGroup(file_path, group_name, &config_manager.feed_group_manager) catch |err| {
@@ -418,12 +406,14 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         }
         const local_group_name = primary_group_name;
 
-        var enabled_feeds = config_manager.getEnabledFeedsFromGroup(local_group_name) catch |err| {
+        var export_arena = std.heap.ArenaAllocator.init(allocator);
+        defer export_arena.deinit();
+        var enabled_feeds = config_manager.getEnabledFeedsFromGroup(export_arena.allocator(), local_group_name) catch |err| {
             try stdout.print("Error: Failed to load configuration\n", .{});
             try stdout.print("Error details: {}\n", .{err});
             return;
         };
-        defer types.deinitFeedList(allocator, &enabled_feeds);
+        defer enabled_feeds.deinit(allocator);
 
         if (enabled_feeds.items.len == 0) {
             try stdout.print("Warning: No feeds found in group '{s}' to export.\n", .{local_group_name});
@@ -434,7 +424,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         const opml_title = config_manager.getGroupDisplayName(local_group_name) catch null;
         defer if (opml_title) |title| allocator.free(title);
 
-        var opml = OpmlManager.init(allocator);
+        var opml = OpmlManager.init(allocator, io);
         defer opml.deinit();
 
         opml.exportToFile(file_path, enabled_feeds, opml_title) catch |err| {
@@ -455,7 +445,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         }
         const group_name = primary_group_name;
 
-        var opml = OpmlManager.init(allocator);
+        var opml = OpmlManager.init(allocator, io);
         defer opml.deinit();
 
         const added_count = opml.importToGroup(source, group_name, &config_manager.feed_group_manager) catch |err| {
@@ -501,48 +491,38 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         const day_offset = std.fmt.parseInt(i32, day_str, 10) catch 0;
 
         var all_cached_items = std.array_list.Managed(types.RssItem).init(allocator);
-        defer {
-            for (all_cached_items.items) |item| item.deinit(allocator);
-            all_cached_items.deinit();
-        }
+        defer all_cached_items.deinit();
 
         var digest_timestamp: i64 = 0;
         var digest_days_ago: ?i32 = null;
         for (group_names) |g_name| {
-            var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+            var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
             defer group_limiter.deinit();
 
-            const state = group_limiter.loadRunByOffset(day_offset) catch |err| {
-                // Warn but continue
+            const state = group_limiter.loadRunByOffset(arena_allocator, day_offset) catch |err| {
                 try stdout.print("Warning: Failed to load history for group '{s}' (offset {d}): {}\n", .{ g_name, day_offset, err });
                 continue;
             };
-            defer state.deinit(allocator);
 
-            // Capture timestamp and days_ago from the first loaded state
             if (digest_timestamp == 0) {
                 if (state.timestamp) |ts| {
                     if (ts > 0) {
                         digest_timestamp = ts;
                     }
                 }
-                // Calculate days_ago from the file date (more accurate than timestamp)
                 if (state.file_date) |fd| {
                     digest_days_ago = group_limiter.daysAgoFromDateString(fd) catch null;
                 }
             }
 
-            // Get group display name
             const g_display_name = config_manager.getGroupDisplayName(g_name) catch null;
             defer if (g_display_name) |d| allocator.free(d);
 
-            // Add all cached items from this group with group info
             for (state.items) |item| {
-                var item_copy = try item.clone(allocator);
-                // Set group info for display
-                item_copy.groupName = try allocator.dupe(u8, g_name);
+                var item_copy = item;
+                item_copy.groupName = try arena_allocator.dupe(u8, g_name);
                 if (g_display_name) |dn| {
-                    item_copy.groupDisplayName = try allocator.dupe(u8, dn);
+                    item_copy.groupDisplayName = try arena_allocator.dupe(u8, dn);
                 }
                 try all_cached_items.append(item_copy);
             }
@@ -555,7 +535,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
                 buf.clearRetainingCapacity();
 
                 // Use the timestamp from the loaded state (or current time if not available)
-                const timestamp = if (digest_timestamp > 0) digest_timestamp else std.time.timestamp();
+                const timestamp = if (digest_timestamp > 0) digest_timestamp else std.Io.Timestamp.now(io, .real).toSeconds();
 
                 var combined_title: []u8 = undefined;
                 if (group_names.len == 1) {
@@ -597,9 +577,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         return;
     };
     defer {
-        for (cmd_line_feeds) |feed| {
-            feed.deinit(allocator);
-        }
+        for (cmd_line_feeds) |feed| allocator.free(feed.xmlUrl);
         allocator.free(cmd_line_feeds);
     }
 
@@ -608,9 +586,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     var cached_items_for_mixing = std.array_list.Managed(types.RssItem).init(allocator);
     var has_cached_items = false;
 
-    // Clean up cached items at the end if we have them
     defer if (has_cached_items) {
-        for (cached_items_for_mixing.items) |item| item.deinit(allocator);
         cached_items_for_mixing.deinit();
     };
 
@@ -622,14 +598,15 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         defer fresh_groups.deinit();
 
         for (group_names) |g_name| {
-            var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+            var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
             defer group_limiter.deinit();
 
             const within = group_limiter.isWithinFetchInterval() catch false;
             const can_load_cache = within and blk: {
-                // Test if cache actually exists and is loadable
-                const test_state = group_limiter.loadLatestRun() catch break :blk false;
-                test_state.deinit(allocator);
+                var check_arena = std.heap.ArenaAllocator.init(allocator);
+                defer check_arena.deinit();
+                const test_state = group_limiter.loadLatestRun(check_arena.allocator()) catch break :blk false;
+                _ = test_state;
                 break :blk true;
             };
 
@@ -643,28 +620,22 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         // 2. If ALL groups are cached, show cache and return early
         if (fresh_groups.items.len == 0 and cached_groups.items.len > 0) {
             var cached_aggregation = std.array_list.Managed(types.RssItem).init(allocator);
-            defer {
-                for (cached_aggregation.items) |item| item.deinit(allocator);
-                cached_aggregation.deinit();
-            }
+            defer cached_aggregation.deinit();
 
             for (cached_groups.items) |g_name| {
-                var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+                var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
                 defer group_limiter.deinit();
 
-                const latest_state = group_limiter.loadLatestRun() catch continue;
-                defer latest_state.deinit(allocator);
+                const latest_state = group_limiter.loadLatestRun(arena_allocator) catch continue;
 
-                // Get group display name
                 const g_display_name = config_manager.getGroupDisplayName(g_name) catch null;
                 defer if (g_display_name) |d| allocator.free(d);
 
                 for (latest_state.items) |item| {
-                    var copy = try item.clone(allocator);
-                    // Set group info for display
-                    copy.groupName = try allocator.dupe(u8, g_name);
+                    var copy = item;
+                    copy.groupName = try arena_allocator.dupe(u8, g_name);
                     if (g_display_name) |dn| {
-                        copy.groupDisplayName = try allocator.dupe(u8, dn);
+                        copy.groupDisplayName = try arena_allocator.dupe(u8, dn);
                     }
                     try cached_aggregation.append(copy);
                 }
@@ -675,7 +646,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
             // Display cached items
             if (display_manager.output_buffer) |buf| {
                 buf.clearRetainingCapacity();
-                const timestamp = std.time.timestamp();
+                    const timestamp = std.Io.Timestamp.now(io, .real).toSeconds();
 
                 var combined_title: []u8 = undefined;
                 if (group_names.len == 1) {
@@ -720,22 +691,19 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
 
             // Load cached items
             for (cached_groups.items) |g_name| {
-                var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+                var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
                 defer group_limiter.deinit();
 
-                const latest_state = group_limiter.loadLatestRun() catch continue;
-                defer latest_state.deinit(allocator);
+                const latest_state = group_limiter.loadLatestRun(arena_allocator) catch continue;
 
-                // Get group display name
                 const g_display_name = config_manager.getGroupDisplayName(g_name) catch null;
                 defer if (g_display_name) |d| allocator.free(d);
 
                 for (latest_state.items) |item| {
-                    var copy = try item.clone(allocator);
-                    // Set group info for display
-                    copy.groupName = try allocator.dupe(u8, g_name);
+                    var copy = item;
+                    copy.groupName = try arena_allocator.dupe(u8, g_name);
                     if (g_display_name) |dn| {
-                        copy.groupDisplayName = try allocator.dupe(u8, dn);
+                        copy.groupDisplayName = try arena_allocator.dupe(u8, dn);
                     }
                     try cached_items_for_mixing.append(copy);
                 }
@@ -743,34 +711,31 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
 
             // If no fresh groups needed, show only cached items
             if (fresh_groups.items.len == 0) {
-                defer {
-                    for (cached_items_for_mixing.items) |item| item.deinit(allocator);
-                    cached_items_for_mixing.deinit();
-                }
+                defer cached_items_for_mixing.deinit();
 
                 if (try tryHandleJsonOutput(allocator, cli, cached_items_for_mixing.items, &.{}, stdout)) return;
 
                 // Display cached items and return
                 if (display_manager.output_buffer) |buf| {
                     buf.clearRetainingCapacity();
-                    const timestamp = std.time.timestamp();
+                const timestamp = std.Io.Timestamp.now(io, .real).toSeconds();
 
-                    var combined_title: []u8 = undefined;
-                    if (group_names.len == 1) {
-                        combined_title = try allocator.dupe(u8, group_display_name orelse primary_group_name);
-                    } else {
-                        var title_builder = std.array_list.Managed(u8).init(allocator);
-                        defer title_builder.deinit();
+                var combined_title: []u8 = undefined;
+                if (group_names.len == 1) {
+                    combined_title = try allocator.dupe(u8, group_display_name orelse primary_group_name);
+                } else {
+                    var title_builder = std.array_list.Managed(u8).init(allocator);
+                    defer title_builder.deinit();
 
-                        for (group_names, 0..) |g_name, i| {
-                            if (i > 0) try title_builder.appendSlice(", ");
-                            const dn = config_manager.getGroupDisplayName(g_name) catch null;
-                            defer if (dn) |d| allocator.free(d);
-                            try title_builder.appendSlice(dn orelse g_name);
-                        }
-                        combined_title = try title_builder.toOwnedSlice();
+                    for (group_names, 0..) |g_name, i| {
+                        if (i > 0) try title_builder.appendSlice(", ");
+                        const dn = config_manager.getGroupDisplayName(g_name) catch null;
+                        defer if (dn) |d| allocator.free(d);
+                        try title_builder.appendSlice(dn orelse g_name);
                     }
-                    const display_title = combined_title;
+                    combined_title = try title_builder.toOwnedSlice();
+                }
+                const display_title = combined_title;
                     defer allocator.free(display_title);
 
                     display_manager.printHysDigestHeader(display_title, timestamp, null);
@@ -795,29 +760,19 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     }
 
     var aggregated_feeds = std.array_list.Managed(types.FeedConfig).init(allocator);
-    defer {
-        for (aggregated_feeds.items) |f| f.deinit(allocator);
-        aggregated_feeds.deinit();
-    }
+    defer aggregated_feeds.deinit();
 
     var feed_group_names = std.array_list.Managed([]const u8).init(allocator);
     defer feed_group_names.deinit();
 
     var feed_group_display_names = std.array_list.Managed(?[]const u8).init(allocator);
-    defer {
-        for (feed_group_display_names.items) |name| {
-            if (name) |n| allocator.free(n);
-        }
-        feed_group_display_names.deinit();
-    }
+    defer feed_group_display_names.deinit();
 
     var has_valid_feeds = false;
 
     if (cmd_line_feeds.len > 0) {
-        // Just use cmd line feeds
         for (cmd_line_feeds) |feed| {
-            const copy = try feed.clone(allocator);
-            try aggregated_feeds.append(copy);
+            try aggregated_feeds.append(feed);
             try feed_group_names.append("main");
             try feed_group_display_names.append(null);
         }
@@ -827,17 +782,17 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         for (group_names) |g_name| {
             // If we have cached items, only process groups that need fresh fetching
             if (has_cached_items) {
-                // Check if this group is in the fresh_groups list
                 var is_fresh_group = false;
                 if (cmd_line_feeds.len == 0) {
-                    // We need to recreate the fresh groups logic here
-                    var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+                    var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
                     defer group_limiter.deinit();
 
                     const within = group_limiter.isWithinFetchInterval() catch false;
                     const can_load_cache = within and blk: {
-                        const test_state = group_limiter.loadLatestRun() catch break :blk false;
-                        test_state.deinit(allocator);
+                        var check_arena = std.heap.ArenaAllocator.init(allocator);
+                        defer check_arena.deinit();
+                        const test_state = group_limiter.loadLatestRun(check_arena.allocator()) catch break :blk false;
+                        _ = test_state;
                         break :blk true;
                     };
 
@@ -857,18 +812,16 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
                 continue;
             }
 
-            var feeds = config_manager.getEnabledFeedsFromGroup(g_name) catch |err| {
+            var feeds = config_manager.getEnabledFeedsFromGroup(arena_allocator, g_name) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to get feeds from group '{s}'", .{g_name});
                 defer allocator.free(msg);
                 display_manager.printError(msg);
                 std.debug.print("Error details: {}\n", .{err});
                 continue;
             };
-            defer types.deinitFeedList(allocator, &feeds); // We clone them out
+            defer feeds.deinit(allocator);
 
             if (feeds.items.len == 0) {
-                // Just warn
-                // Only verify main group content if it's the only one
                 if (group_names.len == 1) {
                     const msg = try std.fmt.allocPrint(allocator, "No feeds in group '{s}'. Use --sub to add feeds.", .{g_name});
                     defer allocator.free(msg);
@@ -878,18 +831,17 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
                 continue;
             }
 
-            // Get group display name once
             const g_display_name = config_manager.getGroupDisplayName(g_name) catch null;
             defer if (g_display_name) |d| allocator.free(d);
 
-            // Clone feeds (no group info stored in FeedConfig)
             for (feeds.items) |feed| {
-                const copy = try feed.clone(allocator);
-                try aggregated_feeds.append(copy);
+                try aggregated_feeds.append(feed);
                 try feed_group_names.append(g_name);
                 var display_name_copy: ?[]const u8 = null;
                 if (g_display_name) |dn| {
-                    display_name_copy = try allocator.dupe(u8, dn);
+                    // Use arena_allocator so we don't have to manually free these strings
+                    // when the feed_group_display_names ArrayList is destroyed.
+                    display_name_copy = try arena_allocator.dupe(u8, dn);
                 }
                 try feed_group_display_names.append(display_name_copy);
             }
@@ -909,11 +861,8 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     // 1. Create an atomic flag to control the animation loop
     var is_loading = std.atomic.Value(bool).init(!json_mode);
 
-    // 2. Spawn a background thread to handle the visual animation (skip in JSON mode)
-    var anim_thread: ?std.Thread = null;
-    if (!json_mode) {
-        anim_thread = try std.Thread.spawn(.{}, runLoadingAnimation, .{ &is_loading, feeds_to_read.len, stdout });
-    }
+    // 2. Spawn a background task to handle the visual animation (skip in JSON mode)
+    var anim_task = if (!json_mode) std.Io.async(io, runLoadingAnimation, .{ io, &is_loading, feeds_to_read.len, stdout }) else null;
 
     var seen_articles = limiter.loadSeenHashes() catch |err| blk: {
         display_manager.printError("Failed to load seen articles hash file");
@@ -933,15 +882,15 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         failed_feeds.deinit();
     }
 
-    var feed_processor = FeedProcessor.init(allocator, global_config.network.maxFeedSizeMB);
+    var feed_processor = FeedProcessor.init(allocator, io, global_config.network.maxFeedSizeMB);
 
     // 3. Perform the blocking fetch on the main thread
     const results = try feed_processor.fetchFeeds(feeds_to_read, if (cmd_line_feeds.len > 0) null else &seen_articles);
 
-    // 4. Signal the animation thread to stop and wait for it to join
+    // 4. Signal the animation task to stop and wait for it to complete
     is_loading.store(false, .release);
-    if (anim_thread) |thread| {
-        thread.join();
+    if (anim_task) |*task| {
+        task.await(io);
         // Clear the loading animation line completely
         try stdout.print("\r                                                                                \r", .{});
         try stdout.flush();
@@ -960,13 +909,13 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     // Calculate cutoff timestamp based on history retention days
     // Items older than this will be silently ignored during processing
     const cutoff_timestamp: i64 = cutoff: {
-        const now = std.time.timestamp();
+        const now = std.Io.Timestamp.now(io, .real).toSeconds();
         const retention_seconds = @as(i64, @intCast(global_config.history.retentionDays)) * 24 * 60 * 60;
         break :cutoff now - retention_seconds;
     };
 
-    // Process results - takes ownership of feed_config and parsed from results
     var all_items = try feed_processor.processResults(
+        arena_allocator,
         results,
         feeds_to_read,
         feed_group_names.items,
@@ -979,12 +928,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
         preserve_order,
         cutoff_timestamp,
     );
-    defer {
-        for (all_items.items) |item| {
-            item.deinit(allocator);
-        }
-        all_items.deinit();
-    }
+    defer all_items.deinit();
 
     // If we have cached items to mix in, combine them with fresh items
     if (cmd_line_feeds.len == 0 and has_cached_items) {
@@ -1052,15 +996,15 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
             }
 
             // Save Day History per group
-            var group_limiter = try DailyLimiter.init(allocator, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
+            var group_limiter = try DailyLimiter.init(allocator, io, home_dir, g_name, global_config.history.dayStartHour, global_config.history.fetchIntervalDays);
             defer group_limiter.deinit();
 
             // Only save if there are items, or if the day's file doesn't exist yet (new day)
             const should_save = group_items.items.len > 0 or blk: {
                 // Duplicate date formatting logic from DailyLimiter
-                var local_tz = zdt.Timezone.tzLocal(allocator) catch break :blk true;
+                var local_tz = zdt.Timezone.tzLocal(io, allocator) catch break :blk true;
                 defer local_tz.deinit();
-                var now = zdt.Datetime.now(.{ .tz = &local_tz }) catch break :blk true;
+                var now = zdt.Datetime.now(io, .{ .tz = &local_tz }) catch break :blk true;
                 if (global_config.history.dayStartHour > 0) {
                     const hour_offset: i64 = -@as(i64, @intCast(global_config.history.dayStartHour));
                     const duration = zdt.Duration.fromTimespanMultiple(hour_offset, .hour);
@@ -1074,10 +1018,10 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
                 }) catch break :blk true;
                 var filename_buf: [256]u8 = undefined;
                 const filename_only = std.fmt.bufPrint(&filename_buf, "{s}_{s}.json", .{ g_name, date_str }) catch break :blk true;
-                const filename = std.fs.path.join(allocator, &.{ group_limiter.state_dir, filename_only }) catch break :blk true;
+                const filename = std.Io.Dir.path.join(allocator, &.{ group_limiter.state_dir, filename_only }) catch break :blk true;
                 defer allocator.free(filename);
                 // If file doesn't exist, save even if empty (new day)
-                std.fs.cwd().access(filename, .{}) catch break :blk true;
+                std.Io.Dir.cwd().access(io, filename, .{}) catch break :blk true;
                 // File exists, don't overwrite with empty
                 break :blk false;
             };
@@ -1161,7 +1105,7 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
             // Only print header if not in preview mode (cmd_line_feeds.len == 0 means no preview)
             if (cmd_line_feeds.len == 0) {
                 // Get current timestamp for the header
-                const timestamp = std.time.timestamp();
+                    const timestamp = std.Io.Timestamp.now(io, .real).toSeconds();
 
                 var combined_title: []u8 = undefined;
                 if (group_names.len == 1) {
@@ -1219,17 +1163,15 @@ fn runApp(allocator: std.mem.Allocator, args: [][:0]u8, stdout: *std.io.Writer) 
     try stdout.flush();
 }
 
-fn outputJson(allocator: std.mem.Allocator, items: []const types.RssItem, failed_feeds: []const []const u8, stdout: *std.io.Writer) !void {
+fn outputJson(allocator: std.mem.Allocator, items: []const types.RssItem, failed_feeds: []const []const u8, stdout: *std.Io.Writer) !void {
     var json_buffer = std.array_list.Managed(u8).init(allocator);
     defer json_buffer.deinit();
 
-    const writer = json_buffer.writer().any();
-
-    try writer.writeAll("{\n");
-    try writer.writeAll("  \"version\": 1,\n");
+    try json_buffer.appendSlice("{\n");
+    try json_buffer.appendSlice("  \"version\": 1,\n");
 
     // Write items array
-    try writer.writeAll("  \"items\": [\n");
+    try json_buffer.appendSlice("  \"items\": [\n");
 
     // Group items by group -> feed for nested structure
     var groups_map = std.StringHashMap(std.StringHashMap(std.array_list.Managed(types.RssItem))).init(allocator);
@@ -1274,14 +1216,14 @@ fn outputJson(allocator: std.mem.Allocator, items: []const types.RssItem, failed
     }.less);
 
     for (sorted_groups.items, 0..) |group_name, group_idx| {
-        if (group_idx > 0) try writer.writeAll(",\n");
+        if (group_idx > 0) try json_buffer.appendSlice(",\n");
 
         const group_entry = groups_map.getPtr(group_name).?;
 
-        try writer.writeAll("    {\n");
-        try writer.writeAll("      \"group\": \"");
-        try formatter.writeJsonEscaped(writer, group_name);
-        try writer.writeAll("\",\n");
+        try json_buffer.appendSlice("    {\n");
+        try json_buffer.appendSlice("      \"group\": \"");
+        try formatter.writeJsonEscaped(&json_buffer, group_name);
+        try json_buffer.appendSlice("\",\n");
 
         // Get group display name from first item
         var display_name: ?[]const u8 = null;
@@ -1292,12 +1234,12 @@ fn outputJson(allocator: std.mem.Allocator, items: []const types.RssItem, failed
             }
         }
         if (display_name) |dn| {
-            try writer.writeAll("      \"groupDisplayName\": \"");
-            try formatter.writeJsonEscaped(writer, dn);
-            try writer.writeAll("\",\n");
+            try json_buffer.appendSlice("      \"groupDisplayName\": \"");
+            try formatter.writeJsonEscaped(&json_buffer, dn);
+            try json_buffer.appendSlice("\",\n");
         }
 
-        try writer.writeAll("      \"feeds\": [\n");
+        try json_buffer.appendSlice("      \"feeds\": [\n");
 
         // Sort feed names for deterministic output
         var sorted_feeds = std.array_list.Managed([]const u8).init(allocator);
@@ -1311,103 +1253,103 @@ fn outputJson(allocator: std.mem.Allocator, items: []const types.RssItem, failed
         }.less);
 
         for (sorted_feeds.items, 0..) |feed_name, feed_idx| {
-            if (feed_idx > 0) try writer.writeAll(",\n");
+            if (feed_idx > 0) try json_buffer.appendSlice(",\n");
 
             const feed_items_list = group_entry.getPtr(feed_name).?;
 
-            try writer.writeAll("        {\n");
-            try writer.writeAll("          \"name\": \"");
-            try formatter.writeJsonEscaped(writer, feed_name);
-            try writer.writeAll("\",\n");
-            try writer.writeAll("          \"items\": [\n");
+            try json_buffer.appendSlice("        {\n");
+            try json_buffer.appendSlice("          \"name\": \"");
+            try formatter.writeJsonEscaped(&json_buffer, feed_name);
+            try json_buffer.appendSlice("\",\n");
+            try json_buffer.appendSlice("          \"items\": [\n");
 
             for (feed_items_list.items, 0..) |item, item_idx| {
-                if (item_idx > 0) try writer.writeAll(",\n");
-                try writer.writeAll("            {\n");
+                if (item_idx > 0) try json_buffer.appendSlice(",\n");
+                try json_buffer.appendSlice("            {\n");
 
                 // Title
-                try writer.writeAll("              \"title\": ");
+                try json_buffer.appendSlice("              \"title\": ");
                 if (item.title) |t| {
-                    try writer.writeAll("\"");
-                    try formatter.writeJsonEscaped(writer, t);
-                    try writer.writeAll("\"");
+                    try json_buffer.appendSlice("\"");
+                    try formatter.writeJsonEscaped(&json_buffer, t);
+                    try json_buffer.appendSlice("\"");
                 } else {
-                    try writer.writeAll("null");
+                    try json_buffer.appendSlice("null");
                 }
-                try writer.writeAll(",\n");
+                try json_buffer.appendSlice(",\n");
 
                 // Link
-                try writer.writeAll("              \"link\": ");
+                try json_buffer.appendSlice("              \"link\": ");
                 if (item.link) |l| {
-                    try writer.writeAll("\"");
-                    try formatter.writeJsonEscaped(writer, l);
-                    try writer.writeAll("\"");
+                    try json_buffer.appendSlice("\"");
+                    try formatter.writeJsonEscaped(&json_buffer, l);
+                    try json_buffer.appendSlice("\"");
                 } else {
-                    try writer.writeAll("null");
+                    try json_buffer.appendSlice("null");
                 }
-                try writer.writeAll(",\n");
+                try json_buffer.appendSlice(",\n");
 
                 // Description
-                try writer.writeAll("              \"description\": ");
+                try json_buffer.appendSlice("              \"description\": ");
                 if (item.description) |d| {
-                    try writer.writeAll("\"");
-                    try formatter.writeJsonEscaped(writer, d);
-                    try writer.writeAll("\"");
+                    try json_buffer.appendSlice("\"");
+                    try formatter.writeJsonEscaped(&json_buffer, d);
+                    try json_buffer.appendSlice("\"");
                 } else {
-                    try writer.writeAll("null");
+                    try json_buffer.appendSlice("null");
                 }
-                try writer.writeAll(",\n");
+                try json_buffer.appendSlice(",\n");
 
                 // Publish Date
-                try writer.writeAll("              \"pubDate\": ");
+                try json_buffer.appendSlice("              \"pubDate\": ");
                 if (item.pubDate) |p| {
-                    try writer.writeAll("\"");
-                    try formatter.writeJsonEscaped(writer, p);
-                    try writer.writeAll("\"");
+                    try json_buffer.appendSlice("\"");
+                    try formatter.writeJsonEscaped(&json_buffer, p);
+                    try json_buffer.appendSlice("\"");
                 } else {
-                    try writer.writeAll("null");
+                    try json_buffer.appendSlice("null");
                 }
-                try writer.writeAll(",\n");
+                try json_buffer.appendSlice(",\n");
 
                 // Timestamp
-                try writer.print("              \"timestamp\": {d},\n", .{item.timestamp});
+                try json_buffer.print("              \"timestamp\": {d},\n", .{item.timestamp});
 
                 // GUID
-                try writer.writeAll("              \"guid\": ");
+                try json_buffer.appendSlice("              \"guid\": ");
                 if (item.guid) |g| {
-                    try writer.writeAll("\"");
-                    try formatter.writeJsonEscaped(writer, g);
-                    try writer.writeAll("\"");
+                    try json_buffer.appendSlice("\"");
+                    try formatter.writeJsonEscaped(&json_buffer, g);
+                    try json_buffer.appendSlice("\"");
                 } else {
-                    try writer.writeAll("null");
+                    try json_buffer.appendSlice("null");
                 }
 
-                try writer.writeAll("\n            }");
+                try json_buffer.appendSlice("\n            }");
             }
 
-            try writer.writeAll("\n          ]\n        }");
+            try json_buffer.appendSlice("\n          ]\n        }");
         }
 
-        try writer.writeAll("\n      ]\n    }");
+        try json_buffer.appendSlice("\n      ]\n    }");
     }
 
-    try writer.writeAll("\n  ],\n");
+    try json_buffer.appendSlice("\n  ],\n");
 
     // Write failed feeds array
-    try writer.writeAll("  \"failedFeeds\": [");
+    try json_buffer.appendSlice("  \"failedFeeds\": [");
     for (failed_feeds, 0..) |name, i| {
-        if (i > 0) try writer.writeAll(", ");
-        try writer.writeAll("\"");
-        try formatter.writeJsonEscaped(writer, name);
-        try writer.writeAll("\"");
+        if (i > 0) try json_buffer.appendSlice(", ");
+        try json_buffer.appendSlice("\"");
+        try formatter.writeJsonEscaped(&json_buffer, name);
+        try json_buffer.appendSlice("\"");
     }
-    try writer.writeAll("],\n");
+    try json_buffer.appendSlice("],\n");
 
     // Write metadata
-    try writer.print("  \"itemCount\": {d},\n", .{items.len});
-    try writer.print("  \"failedCount\": {d}\n", .{failed_feeds.len});
+    try json_buffer.print("  \"itemCount\": {d},\n", .{items.len});
+    try json_buffer.print("  \"failedCount\": {d}\n", .{failed_feeds.len});
 
-    try writer.writeAll("}\n");
+    try json_buffer.appendSlice("}\n");
 
     try stdout.writeAll(json_buffer.items);
 }

@@ -2,13 +2,7 @@ const std = @import("std");
 const types = @import("types");
 const rss_reader = @import("rss_reader");
 
-const c = @cImport({
-    @cInclude("expat.h");
-});
-
-const curl = @cImport({
-    @cInclude("curl/curl.h");
-});
+const c = @import("c");
 
 const CurlWriteContext = struct {
     buffer: *std.array_list.Managed(u8),
@@ -37,11 +31,13 @@ fn curlWriteCallback(data: [*c]const u8, size: usize, nmemb: usize, user_data: ?
 
 pub const OpmlManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
 
-    pub fn init(allocator: std.mem.Allocator) OpmlManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) OpmlManager {
         return OpmlManager{
             .allocator = allocator,
+            .io = io,
             .arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
@@ -57,8 +53,8 @@ pub const OpmlManager = struct {
         defer self.allocator.free(url_z);
         @memcpy(url_z, url);
 
-        const handle = curl.curl_easy_init() orelse return error.CurlFailed;
-        defer curl.curl_easy_cleanup(handle);
+        const handle = c.curl_easy_init() orelse return error.CurlFailed;
+        defer c.curl_easy_cleanup(handle);
 
         var response_buffer = std.array_list.Managed(u8).init(self.allocator);
 
@@ -69,15 +65,15 @@ pub const OpmlManager = struct {
         };
 
         const setup_ok = blk: {
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_URL, url_z.ptr) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEFUNCTION, @as(curl.curl_write_callback, @ptrCast(&curlWriteCallback))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_FOLLOWLOCATION, @as(c_long, 1)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_MAXREDIRS, @as(c_long, 10)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_CONNECTTIMEOUT, @as(c_long, 10)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_TIMEOUT, @as(c_long, 30)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_ACCEPT_ENCODING, "") != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_USERAGENT, "hys-rss/0.2.0") != curl.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_URL, url_z.ptr) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, @as(c.curl_write_callback, @ptrCast(&curlWriteCallback))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 1)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_MAXREDIRS, @as(c_long, 10)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_CONNECTTIMEOUT, @as(c_long, 10)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 30)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_ACCEPT_ENCODING, "") != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_USERAGENT, "hys-rss/0.2.0") != c.CURLE_OK) break :blk false;
             break :blk true;
         };
 
@@ -86,15 +82,15 @@ pub const OpmlManager = struct {
             return error.CurlFailed;
         }
 
-        const result = curl.curl_easy_perform(handle);
+        const result = c.curl_easy_perform(handle);
 
-        if (result != curl.CURLE_OK) {
+        if (result != c.CURLE_OK) {
             response_buffer.deinit();
             return error.NetworkError;
         }
 
         var http_code: c_long = 0;
-        _ = curl.curl_easy_getinfo(handle, curl.CURLINFO_RESPONSE_CODE, &http_code);
+        _ = c.curl_easy_getinfo(handle, c.CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code >= 400) {
             response_buffer.deinit();
             return error.HttpError;
@@ -118,14 +114,7 @@ pub const OpmlManager = struct {
             break :blk try self.fetchFromUrl(source);
         } else blk: {
             // Read from file
-            const file = try std.fs.cwd().openFile(source, .{});
-            defer file.close();
-
-            const file_size = try file.getEndPos();
-            const content = try self.allocator.alloc(u8, file_size);
-            errdefer self.allocator.free(content);
-            _ = try file.readAll(content);
-            break :blk content;
+            break :blk try std.Io.Dir.cwd().readFileAlloc(self.io, source, self.allocator, .limited(1024 * 1024 * 10));
         };
         defer self.allocator.free(raw_content);
 
@@ -134,7 +123,7 @@ pub const OpmlManager = struct {
         defer self.allocator.free(content);
 
         // Skip leading whitespace before XML declaration
-        const trimmed_content = std.mem.trimLeft(u8, content, " \t\n\r");
+        const trimmed_content = std.mem.trim(u8, content, " \t\n\r");
 
         // Parse using arena allocator for temporary storage
         const arena_allocator = self.arena.allocator();
@@ -159,13 +148,14 @@ pub const OpmlManager = struct {
             return error.XmlParseError;
         }
 
-        // Clone to parent allocator (persist the data outside the arena/context)
-        const result = try types.cloneFeedListFromSlice(self.allocator, context.feeds.items);
+        // Copy FeedConfig values to parent allocator; strings remain in opml arena
+        // (arena lives until OpmlManager.deinit, called by the caller)
+        const result_items = try self.allocator.alloc(types.FeedConfig, context.feeds.items.len);
+        for (context.feeds.items, 0..) |feed, i| {
+            result_items[i] = feed;
+        }
 
-        // Explicitly deinit context (arena will be cleaned up when OpmlManager is deinit'd)
-        context.deinit();
-
-        return result;
+        return .{ .items = result_items, .capacity = result_items.len };
     }
 
     /// Import all feeds from an OPML source (file or URL) into a specific group (flattens group structure)
@@ -174,7 +164,7 @@ pub const OpmlManager = struct {
 
         // Parse OPML to get flat list of feeds
         var feed_list = try self.importFromSource(source);
-        defer types.deinitFeedList(self.allocator, &feed_list);
+        defer feed_list.deinit(self.allocator);
 
         var added_count: usize = 0;
 
@@ -200,14 +190,7 @@ pub const OpmlManager = struct {
             break :blk try self.fetchFromUrl(source);
         } else blk: {
             // Read from file
-            const file = try std.fs.cwd().openFile(source, .{});
-            defer file.close();
-
-            const file_size = try file.getEndPos();
-            const content = try self.allocator.alloc(u8, file_size);
-            errdefer self.allocator.free(content);
-            _ = try file.readAll(content);
-            break :blk content;
+            break :blk try std.Io.Dir.cwd().readFileAlloc(self.io, source, self.allocator, .limited(1024 * 1024 * 10));
         };
         defer self.allocator.free(raw_content);
 
@@ -216,7 +199,7 @@ pub const OpmlManager = struct {
         defer self.allocator.free(content);
 
         // Skip leading whitespace before XML declaration
-        const trimmed_content = std.mem.trimLeft(u8, content, " \t\n\r");
+        const trimmed_content = std.mem.trim(u8, content, " \t\n\r");
 
         // Parse using arena allocator for temporary storage
         const arena_allocator = self.arena.allocator();
@@ -249,18 +232,18 @@ pub const OpmlManager = struct {
 
             if (filename.len == 0) return error.InvalidFileName;
 
-            // Clone feeds to parent allocator
-            var feed_list = try types.cloneFeedListFromSlice(self.allocator, group.feeds.items);
-            defer types.deinitFeedList(self.allocator, &feed_list);
+            // Copy feeds to parent allocator; strings remain in opml arena
+            const feeds_slice = try self.allocator.alloc(types.FeedConfig, group.feeds.items.len);
+            for (group.feeds.items, 0..) |feed, i| {
+                feeds_slice[i] = feed;
+            }
 
-            // Create FeedGroup with display_name
             var display_name: ?[]const u8 = null;
             if (group.display_name) |dn| {
                 display_name = try self.allocator.dupe(u8, dn);
             }
             errdefer if (display_name) |dn| self.allocator.free(dn);
 
-            const feeds_slice = try feed_list.toOwnedSlice(self.allocator);
             const feed_group = types.FeedGroup{
                 .name = try self.allocator.dupe(u8, filename),
                 .display_name = display_name,
@@ -268,7 +251,9 @@ pub const OpmlManager = struct {
             };
 
             try feed_group_manager.saveGroupWithMetadata(feed_group);
-            feed_group.deinit(self.allocator);
+            self.allocator.free(feed_group.name);
+            self.allocator.free(feeds_slice);
+            if (display_name) |dn| self.allocator.free(dn);
         }
 
         // Explicitly deinit context (arena will be cleaned up when OpmlManager is deinit'd)
@@ -604,7 +589,7 @@ pub const OpmlManager = struct {
         const safe_title = try self.escapeXml(opml_title);
         defer self.allocator.free(safe_title);
 
-        try std.fmt.format(output.writer(),
+        try output.print(
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<opml version="2.0">
             \\<head>
@@ -632,24 +617,24 @@ pub const OpmlManager = struct {
             var outline_buf = std.array_list.Managed(u8).init(self.allocator);
             defer outline_buf.deinit();
 
-            try std.fmt.format(outline_buf.writer(), "    <outline type=\"rss\" text=\"{s}\" title=\"{s}\" xmlUrl=\"{s}\"", .{ safe_text, safe_feed_title, safe_url });
+            try outline_buf.print("    <outline type=\"rss\" text=\"{s}\" title=\"{s}\" xmlUrl=\"{s}\"", .{ safe_text, safe_feed_title, safe_url });
 
             if (feed.htmlUrl) |html_url| {
                 const safe_html_url = try self.escapeXml(html_url);
                 defer self.allocator.free(safe_html_url);
-                try std.fmt.format(outline_buf.writer(), " htmlUrl=\"{s}\"", .{safe_html_url});
+                try outline_buf.print(" htmlUrl=\"{s}\"", .{safe_html_url});
             }
 
             if (feed.description) |desc| {
                 const safe_desc = try self.escapeXml(desc);
                 defer self.allocator.free(safe_desc);
-                try std.fmt.format(outline_buf.writer(), " description=\"{s}\"", .{safe_desc});
+                try outline_buf.print(" description=\"{s}\"", .{safe_desc});
             }
 
             if (feed.language) |lang| {
                 const safe_lang = try self.escapeXml(lang);
                 defer self.allocator.free(safe_lang);
-                try std.fmt.format(outline_buf.writer(), " language=\"{s}\"", .{safe_lang});
+                try outline_buf.print(" language=\"{s}\"", .{safe_lang});
             }
 
             try output.appendSlice(outline_buf.items);
@@ -661,9 +646,10 @@ pub const OpmlManager = struct {
             \\</opml>
         );
 
-        const file = try std.fs.cwd().createFile(file_path, .{});
-        defer file.close();
-        try file.writeAll(output.items);
+        var atomic_file = try std.Io.Dir.cwd().createFileAtomic(self.io, file_path, .{ .make_path = true, .replace = true });
+        defer atomic_file.deinit(self.io);
+        try atomic_file.file.writeStreamingAll(self.io, output.items);
+        try atomic_file.replace(self.io);
     }
 
     /// Export groups to an OPML file with nested structure
@@ -676,7 +662,7 @@ pub const OpmlManager = struct {
         const safe_title = try self.escapeXml(opml_title);
         defer self.allocator.free(safe_title);
 
-        try std.fmt.format(output.writer(),
+        try output.print(
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<opml version="2.0">
             \\<head>
@@ -692,7 +678,7 @@ pub const OpmlManager = struct {
             const safe_group_title = try self.escapeXml(group_title);
             defer self.allocator.free(safe_group_title);
 
-            try std.fmt.format(output.writer(), "    <outline text=\"{s}\" title=\"{s}\">\n", .{ safe_group_title, safe_group_title });
+            try output.print("    <outline text=\"{s}\" title=\"{s}\">\n", .{ safe_group_title, safe_group_title });
 
             for (group.feeds) |feed| {
                 const safe_url = try self.escapeXml(feed.xmlUrl);
@@ -710,18 +696,30 @@ pub const OpmlManager = struct {
                 var outline_buf = std.array_list.Managed(u8).init(self.allocator);
                 defer outline_buf.deinit();
 
-                try std.fmt.format(outline_buf.writer(), "        <outline text=\"{s}\" title=\"{s}\" xmlUrl=\"{s}\"", .{ safe_feed_text, safe_feed_title, safe_url });
+                try outline_buf.print("        <outline text=\"{s}\" title=\"{s}\" xmlUrl=\"{s}\"", .{ safe_feed_text, safe_feed_title, safe_url });
 
                 if (feed.htmlUrl) |html_url| {
                     const safe_html_url = try self.escapeXml(html_url);
                     defer self.allocator.free(safe_html_url);
-                    try std.fmt.format(outline_buf.writer(), " htmlUrl=\"{s}\"", .{safe_html_url});
+                    try outline_buf.print(" htmlUrl=\"{s}\"", .{safe_html_url});
                 }
 
                 if (feed.description) |desc| {
                     const safe_desc = try self.escapeXml(desc);
                     defer self.allocator.free(safe_desc);
-                    try std.fmt.format(outline_buf.writer(), " description=\"{s}\"", .{safe_desc});
+                    try outline_buf.print(" description=\"{s}\"", .{safe_desc});
+                }
+
+                if (feed.language) |lang| {
+                    const safe_lang = try self.escapeXml(lang);
+                    defer self.allocator.free(safe_lang);
+                    try outline_buf.print(" language=\"{s}\"", .{safe_lang});
+                }
+
+                if (feed.description) |desc| {
+                    const safe_desc = try self.escapeXml(desc);
+                    defer self.allocator.free(safe_desc);
+                    try outline_buf.print(" description=\"{s}\"", .{safe_desc});
                 }
 
                 // Hardcode type="rss" for OPML export
@@ -730,7 +728,7 @@ pub const OpmlManager = struct {
                 if (feed.language) |lang| {
                     const safe_lang = try self.escapeXml(lang);
                     defer self.allocator.free(safe_lang);
-                    try std.fmt.format(outline_buf.writer(), " language=\"{s}\"", .{safe_lang});
+                    try outline_buf.print(" language=\"{s}\"", .{safe_lang});
                 }
 
                 try output.appendSlice(outline_buf.items);
@@ -745,9 +743,10 @@ pub const OpmlManager = struct {
             \\</opml>
         );
 
-        const file = try std.fs.cwd().createFile(file_path, .{});
-        defer file.close();
-        try file.writeAll(output.items);
+        var atomic_file = try std.Io.Dir.cwd().createFileAtomic(self.io, file_path, .{ .make_path = true, .replace = true });
+        defer atomic_file.deinit(self.io);
+        try atomic_file.file.writeStreamingAll(self.io, output.items);
+        try atomic_file.replace(self.io);
     }
 
     fn escapeXml(self: *OpmlManager, input: []const u8) ![]u8 {

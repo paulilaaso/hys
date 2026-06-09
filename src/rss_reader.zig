@@ -2,13 +2,7 @@ const std = @import("std");
 const zdt = @import("zdt");
 const types = @import("types");
 
-const c = @cImport({
-    @cInclude("expat.h");
-});
-
-const curl = @cImport({
-    @cInclude("curl/curl.h");
-});
+const c = @import("c");
 
 /// RssReader error set - domain-specific errors for feed reading operations
 pub const RssReaderError = error{
@@ -112,7 +106,7 @@ pub const RssReader = struct {
         var pos: usize = 0;
         while (pos < text.len) {
             // Find next underline start code: \x1b[4m
-            if (std.mem.indexOf(u8, text[pos..], "\x1b[4m")) |offset| {
+            if (std.mem.find(u8, text[pos..], "\x1b[4m")) |offset| {
                 const seq_start = pos + offset;
                 // Append text before the sequence
                 try result.appendSlice(text[pos..seq_start]);
@@ -121,7 +115,7 @@ pub const RssReader = struct {
                 continue;
             }
             // Find next underline end code: \x1b[24m
-            if (std.mem.indexOf(u8, text[pos..], "\x1b[24m")) |offset| {
+            if (std.mem.find(u8, text[pos..], "\x1b[24m")) |offset| {
                 const seq_start = pos + offset;
                 // Append text before the sequence
                 try result.appendSlice(text[pos..seq_start]);
@@ -288,10 +282,10 @@ pub const RssReader = struct {
         const scan_slice = content[0..scan_limit];
 
         // Check for known feed/RSS/Atom indicators
-        return std.mem.indexOfAny(u8, scan_slice, "<rss") != null or
-            std.mem.indexOfAny(u8, scan_slice, "<feed") != null or
-            std.mem.indexOfAny(u8, scan_slice, "<RDF") != null or
-            std.mem.indexOfAny(u8, scan_slice, "<?xml") != null;
+        return std.mem.find(u8, scan_slice, "<rss") != null or
+            std.mem.find(u8, scan_slice, "<feed") != null or
+            std.mem.find(u8, scan_slice, "<RDF") != null or
+            std.mem.find(u8, scan_slice, "<?xml") != null;
     }
 
     // --- State Management ---
@@ -645,7 +639,7 @@ pub const RssReader = struct {
     /// Helper to extract value from href="value" or href='value'
     fn extractHref(tag_content: []const u8) ?[]const u8 {
         // Find "href=" (case insensitive check would be better, but simple is fast)
-        const href_idx = std.mem.indexOf(u8, tag_content, "href=") orelse return null;
+        const href_idx = std.mem.find(u8, tag_content, "href=") orelse return null;
 
         // Start looking after href=
         var start = href_idx + 5;
@@ -656,7 +650,7 @@ pub const RssReader = struct {
         if (quote == '"' or quote == '\'') {
             start += 1; // Skip opening quote
             // Find closing quote
-            const end = std.mem.indexOfScalarPos(u8, tag_content, start, quote) orelse return null;
+            const end = std.mem.findScalarPos(u8, tag_content, start, quote) orelse return null;
             return tag_content[start..end];
         }
 
@@ -884,7 +878,7 @@ pub const RssReader = struct {
         var pos: usize = 0;
         while (pos < text.len) {
             // Find next escape sequence
-            if (std.mem.indexOfScalar(u8, text[pos..], '\x1b')) |offset| {
+            if (std.mem.findScalar(u8, text[pos..], '\x1b')) |offset| {
                 const esc_start = pos + offset;
                 // Append text before the escape
                 try output.appendSlice(text[pos..esc_start]);
@@ -905,7 +899,7 @@ pub const RssReader = struct {
             }
 
             // Find next https://
-            if (std.mem.indexOf(u8, text[pos..], "https://")) |offset| {
+            if (std.mem.find(u8, text[pos..], "https://")) |offset| {
                 const url_start = pos + offset;
                 // Append text before the URL
                 try output.appendSlice(text[pos..url_start]);
@@ -921,7 +915,7 @@ pub const RssReader = struct {
             }
 
             // Find next http://
-            if (std.mem.indexOf(u8, text[pos..], "http://")) |offset| {
+            if (std.mem.find(u8, text[pos..], "http://")) |offset| {
                 const url_start = pos + offset;
                 // Append text before the URL
                 try output.appendSlice(text[pos..url_start]);
@@ -1107,10 +1101,21 @@ pub const RssReader = struct {
         const year = std.fmt.parseInt(i16, year_str, 10) catch return error.InvalidRfc822;
         const time_str = it.next() orelse return error.InvalidRfc822;
 
-        var time_it = std.mem.splitSequence(u8, time_str, ":");
-        const hour = std.fmt.parseInt(u8, time_it.next() orelse "0", 10) catch 0;
-        const minute = std.fmt.parseInt(u8, time_it.next() orelse "0", 10) catch 0;
-        const second = std.fmt.parseInt(u8, time_it.next() orelse "0", 10) catch 0;
+        var hour: u8 = 0;
+        var minute: u8 = 0;
+        var second: u8 = 0;
+
+        if (std.mem.cut(u8, time_str, ":")) |cut1| {
+            hour = std.fmt.parseInt(u8, cut1.@"0", 10) catch 0;
+            if (std.mem.cut(u8, cut1.@"1", ":")) |cut2| {
+                minute = std.fmt.parseInt(u8, cut2.@"0", 10) catch 0;
+                second = std.fmt.parseInt(u8, cut2.@"1", 10) catch 0;
+            } else {
+                minute = std.fmt.parseInt(u8, cut1.@"1", 10) catch 0;
+            }
+        } else {
+            hour = std.fmt.parseInt(u8, time_str, 10) catch 0;
+        }
 
         // Create zdt Datetime and get timestamp
         const dt = zdt.Datetime.fromFields(.{
@@ -1199,7 +1204,7 @@ pub const RssReader = struct {
         // Look for Content-Type header
         if (std.ascii.startsWithIgnoreCase(line, "content-type:")) {
             const trimmed = std.mem.trim(u8, line, " \r\n\t");
-            if (std.mem.indexOf(u8, trimmed, ":")) |colon_idx| {
+            if (std.mem.find(u8, trimmed, ":")) |colon_idx| {
                 const ct_value = std.mem.trim(u8, trimmed[colon_idx + 1 ..], " ");
                 ctx.content_type_buffer.clearRetainingCapacity();
                 ctx.content_type_buffer.appendSlice(ct_value) catch {};
@@ -1231,14 +1236,14 @@ pub const RssReader = struct {
 
     fn fetchWithLibcurl(self: *RssReader, url: []const u8) RssReaderError![]u8 {
         const allocator = self.allocator;
-        const max_bytes: usize = @intFromFloat(self.max_feed_size_mb * 1024 * 1024);
+        const max_bytes: usize = @trunc(self.max_feed_size_mb * 1024.0 * 1024.0);
 
         const url_z = allocator.allocSentinel(u8, url.len, 0) catch return RssReaderError.OutOfMemory;
         defer allocator.free(url_z);
         @memcpy(url_z, url);
 
-        const handle = curl.curl_easy_init() orelse return RssReaderError.CurlFailed;
-        defer curl.curl_easy_cleanup(handle);
+        const handle = c.curl_easy_init() orelse return RssReaderError.CurlFailed;
+        defer c.curl_easy_cleanup(handle);
 
         var response_buffer = std.array_list.Managed(u8).init(allocator);
         defer response_buffer.deinit();
@@ -1254,17 +1259,17 @@ pub const RssReader = struct {
         };
 
         const setup_ok = blk: {
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_URL, url_z.ptr) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEFUNCTION, @as(curl.curl_write_callback, @ptrCast(&curlWriteCallback))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_HEADERFUNCTION, @as(curl.curl_write_callback, @ptrCast(&curlHeaderCallback))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_HEADERDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_FOLLOWLOCATION, @as(c_long, 1)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_MAXREDIRS, @as(c_long, 10)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_CONNECTTIMEOUT, @as(c_long, 5)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_TIMEOUT, @as(c_long, 30)) != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_ACCEPT_ENCODING, "") != curl.CURLE_OK) break :blk false;
-            if (curl.curl_easy_setopt(handle, curl.CURLOPT_USERAGENT, "hys-rss/0.2.0") != curl.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_URL, url_z.ptr) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, @as(c.curl_write_callback, @ptrCast(&curlWriteCallback))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_HEADERFUNCTION, @as(c.curl_write_callback, @ptrCast(&curlHeaderCallback))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_HEADERDATA, @as(*anyopaque, @ptrCast(&write_ctx))) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 1)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_MAXREDIRS, @as(c_long, 10)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_CONNECTTIMEOUT, @as(c_long, 5)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 30)) != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_ACCEPT_ENCODING, "") != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_USERAGENT, "hys-rss/0.2.0") != c.CURLE_OK) break :blk false;
             break :blk true;
         };
 
@@ -1272,10 +1277,10 @@ pub const RssReader = struct {
             return RssReaderError.CurlFailed;
         }
 
-        const result = curl.curl_easy_perform(handle);
+        const result = c.curl_easy_perform(handle);
 
-        if (result != curl.CURLE_OK) {
-            if (result == curl.CURLE_WRITE_ERROR and write_ctx.exceeded_limit and response_buffer.items.len > 0) {
+        if (result != c.CURLE_OK) {
+            if (result == c.CURLE_WRITE_ERROR and write_ctx.exceeded_limit and response_buffer.items.len > 0) {
                 // Expected abort
             } else {
                 return RssReaderError.NetworkError;
@@ -1283,7 +1288,7 @@ pub const RssReader = struct {
         }
 
         var http_code: c_long = 0;
-        _ = curl.curl_easy_getinfo(handle, curl.CURLINFO_RESPONSE_CODE, &http_code);
+        _ = c.curl_easy_getinfo(handle, c.CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code >= 400) {
             return RssReaderError.HttpError;
         }
@@ -1330,8 +1335,8 @@ pub const RssReader = struct {
 
     fn truncateAtLastCompleteItem(self: *RssReader, content: []u8) RssReaderError![]u8 {
         var final_size = content.len;
-        const item_idx = std.mem.lastIndexOf(u8, content, "</item>");
-        const entry_idx = std.mem.lastIndexOf(u8, content, "</entry>");
+        const item_idx = std.mem.findLast(u8, content, "</item>");
+        const entry_idx = std.mem.findLast(u8, content, "</entry>");
 
         if (item_idx) |idx| final_size = idx + 7;
         if (entry_idx) |idx| {

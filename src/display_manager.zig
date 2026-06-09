@@ -8,46 +8,31 @@ pub const DisplayManager = struct {
     allocator: std.mem.Allocator,
     formatter: Formatter,
     output_buffer: ?*std.array_list.Managed(u8),
-    pager_process: ?*std.process.Child = null,
     use_pager_streaming: bool = false,
     pager_mode: bool = false,
     stdout: *std.Io.Writer,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
 
-    pub fn init(allocator: std.mem.Allocator, config_display: types.DisplayConfig, stdout: *std.Io.Writer) !DisplayManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, config_display: types.DisplayConfig, stdout: *std.Io.Writer) !DisplayManager {
         const output_buffer = try allocator.create(std.array_list.Managed(u8));
         output_buffer.* = std.array_list.Managed(u8).init(allocator);
 
         var dm: DisplayManager = undefined;
         dm.allocator = allocator;
         dm.output_buffer = output_buffer;
-        dm.pager_process = null;
         dm.use_pager_streaming = false;
         dm.pager_mode = config_display.pagerMode;
         dm.stdout = stdout;
+        dm.io = io;
+        dm.environ_map = environ_map;
 
-        dm.formatter = Formatter.initWithBuffer(allocator, config_display, output_buffer);
+        dm.formatter = Formatter.initWithBuffer(allocator, io, environ_map, config_display, output_buffer);
 
         return dm;
     }
 
     pub fn deinit(self: *DisplayManager) void {
-        if (self.pager_process) |process| {
-            // Close stdin first to signal EOF to the pager
-            if (process.stdin) |stdin| {
-                var stdin_copy = stdin;
-                stdin_copy.close();
-                process.stdin = null;
-            }
-
-            // Wait for pager to finish
-            _ = process.wait() catch |err| {
-                std.debug.print("Warning: Failed to wait for pager process: {}\n", .{err});
-            };
-
-            // Clean up the allocated process
-            self.allocator.destroy(process);
-        }
-
         if (self.output_buffer) |buf| {
             buf.deinit();
             self.allocator.destroy(buf);
@@ -238,8 +223,7 @@ pub const DisplayManager = struct {
             if (builtin.os.tag == .windows) {
                 // Check if 'less' exists, otherwise fall back to direct print (not 'more')
                 // 'more' destroys ANSI codes on Windows
-                const exit_code = std.process.Child.run(.{
-                    .allocator = self.allocator,
+                const exit_code = std.process.run(self.allocator, self.io, .{
                     .argv = &[_][]const u8{ "where", "less" },
                 }) catch {
                     // 'where' command failed or less not found, fallback to stdout
@@ -250,7 +234,7 @@ pub const DisplayManager = struct {
                 defer self.allocator.free(exit_code.stdout);
                 defer self.allocator.free(exit_code.stderr);
 
-                if (exit_code.term != .Exited or exit_code.term.Exited != 0) {
+                if (exit_code.term != .exited or exit_code.term.exited != 0) {
                     // less not found, print directly
                     try self.stdout.writeAll(buf.items);
                     buf.clearRetainingCapacity();
@@ -259,32 +243,35 @@ pub const DisplayManager = struct {
                 // If we are here, 'less' is in PATH on Windows (e.g., via Git Bash or Chocolatey)
             }
 
-            var child = std.process.Child.init(&argv, self.allocator);
-            child.stdin_behavior = .Pipe;
             // Set LESS_TERMCAP_vb to inhibit visual bell on both old and new versions of less
-            var env_map = try std.process.getEnvMap(self.allocator);
+            var env_map = try self.environ_map.clone(self.allocator);
             defer env_map.deinit();
             try env_map.put("LESS_TERMCAP_vb", "\x1B[s");
-            child.env_map = &env_map;
-            child.spawn() catch {
+
+            var child = std.process.spawn(self.io, .{
+                .argv = &argv,
+                .stdin = .pipe,
+                .environ_map = &env_map,
+            }) catch {
                 // Fallback: just print if pager fails
                 try self.stdout.writeAll(buf.items);
                 buf.clearRetainingCapacity();
                 return;
             };
+            defer child.kill(self.io);
 
             if (child.stdin) |*stdin| {
                 defer {
-                    stdin.close();
+                    stdin.close(self.io);
                     child.stdin = null;
                 }
-                stdin.writeAll(buf.items) catch |err| {
+                stdin.writeStreamingAll(self.io, buf.items) catch |err| {
                     if (err != error.BrokenPipe) {
                         return err;
                     }
                 };
             }
-            _ = try child.wait();
+            _ = try child.wait(self.io);
             // Clear buffer after successful pipe to prevent duplicate calls from flush()
             buf.clearRetainingCapacity();
         }

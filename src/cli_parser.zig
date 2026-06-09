@@ -33,9 +33,9 @@ pub const ParseError = error{
 pub const CliParser = struct {
     allocator: std.mem.Allocator,
     // Explicitly mark as sentinel-terminated strings as per std.process.argsAlloc
-    args: [][:0]u8,
+    args: []const [:0]const u8,
 
-    pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) CliParser {
+    pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) CliParser {
         return CliParser{
             .allocator = allocator,
             .args = args,

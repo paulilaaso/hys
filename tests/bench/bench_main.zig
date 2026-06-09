@@ -2,10 +2,6 @@ const std = @import("std");
 const types = @import("types");
 const RssReader = @import("rss_reader").RssReader;
 
-const curl = @cImport({
-    @cInclude("curl/curl.h");
-});
-
 /// Generate a dummy RSS feed with the specified number of items
 fn generateDummyFeed(allocator: std.mem.Allocator, item_count: usize) ![]u8 {
     var output = std.array_list.Managed(u8).init(allocator);
@@ -45,19 +41,12 @@ fn generateDummyFeed(allocator: std.mem.Allocator, item_count: usize) ![]u8 {
     return output.toOwnedSlice();
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const check = gpa.deinit();
-        if (check == .leak) {
-            std.debug.print("\n⚠️  WARNING: Memory leak detected during cleanup!\n", .{});
-        }
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
 
     var iterations: usize = 100;
     var items_per_feed: usize = 50;
@@ -154,11 +143,11 @@ pub fn main() !void {
     var parse_times = try allocator.alloc(i64, iterations);
     defer allocator.free(parse_times);
 
-    var overall_timer = try std.time.Timer.start();
+    const overall_start = std.Io.Timestamp.now(init.io, .awake);
 
     var iter: usize = 0;
     while (iter < iterations) : (iter += 1) {
-        var iter_timer = try std.time.Timer.start();
+        const iter_start = std.Io.Timestamp.now(init.io, .awake);
 
         for (feeds) |feed_data| {
             var reader = RssReader.init(allocator);
@@ -172,15 +161,14 @@ pub fn main() !void {
             parsed.deinit();
         }
 
-        const iter_time_ns = iter_timer.read();
+        const iter_time_ns = iter_start.untilNow(init.io, .awake).toNanoseconds();
         parse_times[iter] = @as(i64, @intCast(iter_time_ns));
     }
 
     // Calculate statistics
-    const total_time_ns = overall_timer.read();
-    const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-    const avg_iter_time_ns = @divTrunc(total_time_ns, @as(i128, @intCast(iterations)));
-    const avg_iter_time_us = @as(f64, @floatFromInt(avg_iter_time_ns)) / 1_000.0;
+    const total_duration = overall_start.untilNow(init.io, .awake);
+    const total_time_ns = total_duration.toNanoseconds();
+    const avg_iter_ns = @divTrunc(total_time_ns, @as(i128, @intCast(iterations)));
 
     // Sort for percentiles
     std.mem.sort(i64, parse_times, {}, std.sort.asc(i64));
@@ -189,14 +177,15 @@ pub fn main() !void {
     const p95_idx = (iterations * 95) / 100;
     const p99_idx = (iterations * 99) / 100;
 
-    const p50_us = @as(f64, @floatFromInt(parse_times[p50_idx])) / 1_000.0;
-    const p95_us = @as(f64, @floatFromInt(parse_times[p95_idx])) / 1_000.0;
-    const p99_us = @as(f64, @floatFromInt(parse_times[p99_idx])) / 1_000.0;
-    const min_us = @as(f64, @floatFromInt(parse_times[0])) / 1_000.0;
-    const max_us = @as(f64, @floatFromInt(parse_times[iterations - 1])) / 1_000.0;
+    const p50 = std.Io.Duration.fromNanoseconds(@as(i96, @intCast(parse_times[p50_idx])));
+    const p95 = std.Io.Duration.fromNanoseconds(@as(i96, @intCast(parse_times[p95_idx])));
+    const p99 = std.Io.Duration.fromNanoseconds(@as(i96, @intCast(parse_times[p99_idx])));
+    const min_dur = std.Io.Duration.fromNanoseconds(@as(i96, @intCast(parse_times[0])));
+    const max_dur = std.Io.Duration.fromNanoseconds(@as(i96, @intCast(parse_times[iterations - 1])));
 
     // Throughput calculations
     const total_items_expected = iterations * num_feeds * items_per_feed;
+    const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
     const items_per_second = @as(f64, @floatFromInt(total_items_parsed)) / (total_time_ms / 1000.0);
     const kb_per_second = @as(f64, @floatFromInt(total_feed_size * iterations)) / (total_time_ms / 1000.0) / 1024.0;
 
@@ -206,19 +195,19 @@ pub fn main() !void {
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("Timing (per iteration of {d} feeds):\n", .{num_feeds});
-    std.debug.print("  Average:    {d:.2} µs\n", .{avg_iter_time_us});
-    std.debug.print("  Median:     {d:.2} µs (p50)\n", .{p50_us});
-    std.debug.print("  p95:        {d:.2} µs\n", .{p95_us});
-    std.debug.print("  p99:        {d:.2} µs\n", .{p99_us});
-    std.debug.print("  Min:        {d:.2} µs\n", .{min_us});
-    std.debug.print("  Max:        {d:.2} µs\n", .{max_us});
+    std.debug.print("  Average:    {f}\n", .{std.Io.Duration.fromNanoseconds(@as(i96, @intCast(avg_iter_ns)))});
+    std.debug.print("  Median:     {f} (p50)\n", .{p50});
+    std.debug.print("  p95:        {f}\n", .{p95});
+    std.debug.print("  p99:        {f}\n", .{p99});
+    std.debug.print("  Min:        {f}\n", .{min_dur});
+    std.debug.print("  Max:        {f}\n", .{max_dur});
     std.debug.print("\n", .{});
     std.debug.print("Throughput:\n", .{});
     std.debug.print("  Items parsed: {d} / {d} expected\n", .{ total_items_parsed, total_items_expected });
     std.debug.print("  Items/sec:    {d:.0}\n", .{items_per_second});
     std.debug.print("  KB/sec:       {d:.2}\n", .{kb_per_second});
     std.debug.print("\n", .{});
-    std.debug.print("Total time: {d:.2} ms\n", .{total_time_ms});
+    std.debug.print("Total time: {f}\n", .{total_duration});
     std.debug.print("\n", .{});
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
     std.debug.print("\n✓ Benchmark complete. Memory status will be reported at exit.\n", .{});

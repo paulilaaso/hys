@@ -3,16 +3,17 @@ const types = @import("types");
 const rss_reader = @import("rss_reader");
 
 /// FeedGroupManager handles loading, saving, and managing feed groups.
-/// OWNERSHIP REQUIREMENT: feeds_dir must be owned by the allocator.
 pub const FeedGroupManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     feeds_dir: []u8,
 
-    pub fn init(allocator: std.mem.Allocator, base_dir: []const u8) !FeedGroupManager {
-        const feeds_dir = try std.fs.path.join(allocator, &.{ base_dir, "feeds" });
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, base_dir: []const u8) !FeedGroupManager {
+        const feeds_dir = try std.Io.Dir.path.join(allocator, &.{ base_dir, "feeds" });
 
         var manager = FeedGroupManager{
             .allocator = allocator,
+            .io = io,
             .feeds_dir = feeds_dir,
         };
 
@@ -25,59 +26,53 @@ pub const FeedGroupManager = struct {
     }
 
     fn ensureFeedsDir(self: FeedGroupManager) !void {
-        std.fs.cwd().makePath(self.feeds_dir) catch |err| switch (err) {
+        std.Io.Dir.cwd().createDirPath(self.io, self.feeds_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
     }
 
-    /// Load a complete feed group with metadata
-    pub fn loadGroupWithMetadata(self: FeedGroupManager, group_name: []const u8) !types.FeedGroup {
+    /// Load a complete feed group with metadata into the given arena allocator.
+    /// All strings in the returned FeedGroup are allocated via arena_allocator.
+    pub fn loadGroupWithMetadata(self: FeedGroupManager, arena_allocator: std.mem.Allocator, group_name: []const u8) !types.FeedGroup {
         const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{group_name});
         defer self.allocator.free(filename);
 
-        const file_path = try std.fs.path.join(self.allocator, &.{ self.feeds_dir, filename });
+        const file_path = try std.Io.Dir.path.join(self.allocator, &.{ self.feeds_dir, filename });
         defer self.allocator.free(file_path);
 
-        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
+        const contents = std.Io.Dir.cwd().readFileAlloc(self.io, file_path, self.allocator, .limited(1024 * 1024 * 10)) catch |err| switch (err) {
             error.FileNotFound => {
-                // Return empty group for non-existent groups
                 return types.FeedGroup{
-                    .name = try self.allocator.dupe(u8, group_name),
+                    .name = try arena_allocator.dupe(u8, group_name),
                     .display_name = null,
                     .feeds = &.{},
                 };
             },
             else => return err,
         };
-        defer file.close();
-
-        const file_size = try file.getEndPos();
-        const contents = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(contents);
-        _ = try file.readAll(contents);
 
-        return self.parseGroupWithMetadata(group_name, contents);
+        return self.parseGroupWithMetadata(arena_allocator, group_name, contents);
     }
 
     /// Update the display name of a group
     pub fn setGroupDisplayName(self: FeedGroupManager, group_name: []const u8, display_name: ?[]const u8) !void {
-        var group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
 
-        // Update display name
-        if (group.display_name) |old_name| {
-            self.allocator.free(old_name);
-        }
-        group.display_name = if (display_name) |name| try self.allocator.dupe(u8, name) else null;
+        var group = try self.loadGroupWithMetadata(arena.allocator(), group_name);
+        group.display_name = if (display_name) |name| try arena.allocator().dupe(u8, name) else null;
 
         try self.saveGroupWithMetadata(group);
     }
 
     /// Get the display name of a group
     pub fn getGroupDisplayName(self: FeedGroupManager, group_name: []const u8) !?[]const u8 {
-        const group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const group = try self.loadGroupWithMetadata(arena.allocator(), group_name);
 
         return if (group.display_name) |name| try self.allocator.dupe(u8, name) else null;
     }
@@ -87,11 +82,9 @@ pub const FeedGroupManager = struct {
         const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{group.name});
         defer self.allocator.free(filename);
 
-        const file_path = try std.fs.path.join(self.allocator, &.{ self.feeds_dir, filename });
+        const file_path = try std.Io.Dir.path.join(self.allocator, &.{ self.feeds_dir, filename });
         defer self.allocator.free(file_path);
 
-        // Create group data structure for JSON serialization
-        // Use 'text' for display name to match FeedConfig convention
         const GroupData = struct {
             text: ?[]const u8,
             feeds: []const types.FeedConfig,
@@ -102,28 +95,25 @@ pub const FeedGroupManager = struct {
             .feeds = group.feeds,
         };
 
-        const json_string = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(group_data, .{
+        var atomic_file = try std.Io.Dir.cwd().createFileAtomic(self.io, file_path, .{ .make_path = true, .replace = true });
+        defer atomic_file.deinit(self.io);
+        var json_buf: [4096]u8 = undefined;
+        var json_writer = atomic_file.file.writer(self.io, &json_buf);
+        try json_writer.interface.print("{f}", .{std.json.fmt(group_data, .{
             .whitespace = .indent_2,
             .emit_null_optional_fields = false,
         })});
-        defer self.allocator.free(json_string);
-
-        const file = try std.fs.cwd().createFile(file_path, .{});
-        defer file.close();
-        try file.writeAll(json_string);
+        try json_writer.flush();
+        try atomic_file.replace(self.io);
     }
 
     /// Save updated ETags/Last-Modified headers for a group after fetching.
-    /// Loads the full group from disk (preserving disabled feeds), merges
-    /// updated headers from `fetched_feeds`, and writes back.
-    /// Skips silently if no feeds in `fetched_feed_group_names` match `group_name`.
     pub fn saveUpdatedHeaders(
         self: FeedGroupManager,
         group_name: []const u8,
         fetched_feeds: []const types.FeedConfig,
         fetched_feed_group_names: []const []const u8,
     ) !void {
-        // Check if this group has any fetched feeds
         var has_fetched = false;
         for (fetched_feed_group_names) |fgn| {
             if (std.mem.eql(u8, fgn, group_name)) {
@@ -133,11 +123,11 @@ pub const FeedGroupManager = struct {
         }
         if (!has_fetched) return;
 
-        // Load full group to preserve disabled feeds and other metadata
-        var group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
 
-        // Update headers from fetched feeds
+        const group = try self.loadGroupWithMetadata(arena.allocator(), group_name);
+
         for (group.feeds) |*feed| {
             if (!feed.enabled) continue;
 
@@ -146,12 +136,10 @@ pub const FeedGroupManager = struct {
                     std.mem.eql(u8, fetched_feed.xmlUrl, feed.xmlUrl))
                 {
                     if (fetched_feed.etag) |new_etag| {
-                        if (feed.etag) |old_etag| self.allocator.free(old_etag);
-                        feed.etag = try self.allocator.dupe(u8, new_etag);
+                        feed.etag = try arena.allocator().dupe(u8, new_etag);
                     }
                     if (fetched_feed.lastModified) |new_lm| {
-                        if (feed.lastModified) |old_lm| self.allocator.free(old_lm);
-                        feed.lastModified = try self.allocator.dupe(u8, new_lm);
+                        feed.lastModified = try arena.allocator().dupe(u8, new_lm);
                     }
                     break;
                 }
@@ -166,54 +154,48 @@ pub const FeedGroupManager = struct {
         const filename = std.fmt.allocPrint(self.allocator, "{s}.json", .{group_name}) catch return false;
         defer self.allocator.free(filename);
 
-        const file_path = std.fs.path.join(self.allocator, &.{ self.feeds_dir, filename }) catch return false;
+        const file_path = std.Io.Dir.path.join(self.allocator, &.{ self.feeds_dir, filename }) catch return false;
         defer self.allocator.free(file_path);
 
-        std.fs.cwd().access(file_path, .{}) catch return false;
+        std.Io.Dir.cwd().access(self.io, file_path, .{}) catch return false;
         return true;
     }
 
     /// Add a feed to a specific group
     pub fn addFeedToGroup(self: FeedGroupManager, group_name: []const u8, url: []const u8, name: ?[]const u8) !void {
-        // Validate URL before processing
         try rss_reader.validateFeedUrl(url);
 
-        var group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
 
-        // Check if feed already exists
+        const group = try self.loadGroupWithMetadata(arena.allocator(), group_name);
+
         for (group.feeds) |feed| {
             if (std.mem.eql(u8, feed.xmlUrl, url)) {
                 return error.FeedAlreadyExists;
             }
         }
 
-        // Sanitize URL and text before storage
-        const sanitized_url = try rss_reader.RssReader.sanitizeFeedData(url, self.allocator);
-        errdefer self.allocator.free(sanitized_url);
-
+        const sanitized_url = try rss_reader.RssReader.sanitizeFeedData(url, arena.allocator());
         var sanitized_name: ?[]const u8 = null;
         if (name) |n| {
-            const san = try rss_reader.RssReader.sanitizeFeedData(n, self.allocator);
-            errdefer self.allocator.free(san);
-            sanitized_name = san;
+            sanitized_name = try rss_reader.RssReader.sanitizeFeedData(n, arena.allocator());
         }
 
-        // Create a new feeds slice with the additional feed
-        var feeds_list = try types.cloneFeedListFromSlice(self.allocator, group.feeds);
-        defer types.deinitFeedList(self.allocator, &feeds_list);
-
-        try feeds_list.append(self.allocator, types.FeedConfig{
+        var feeds_list = try arena.allocator().alloc(types.FeedConfig, group.feeds.len + 1);
+        for (group.feeds, 0..) |f, i| {
+            feeds_list[i] = f;
+        }
+        feeds_list[group.feeds.len] = types.FeedConfig{
             .xmlUrl = sanitized_url,
             .text = sanitized_name,
             .enabled = true,
-        });
+        };
 
-        // Create updated group and save
         const updated_group = types.FeedGroup{
             .name = group.name,
             .display_name = group.display_name,
-            .feeds = feeds_list.items,
+            .feeds = feeds_list,
         };
 
         try self.saveGroupWithMetadata(updated_group);
@@ -221,52 +203,35 @@ pub const FeedGroupManager = struct {
 
     /// Add a feed config (with all metadata) to a specific group
     pub fn addFeedConfigToGroup(self: FeedGroupManager, group_name: []const u8, feed_config: types.FeedConfig) !void {
-        // Validate URL before processing
         try rss_reader.validateFeedUrl(feed_config.xmlUrl);
 
-        var group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
 
-        // Check if feed already exists
+        const group = try self.loadGroupWithMetadata(arena.allocator(), group_name);
+
         for (group.feeds) |feed| {
             if (std.mem.eql(u8, feed.xmlUrl, feed_config.xmlUrl)) {
                 return error.FeedAlreadyExists;
             }
         }
 
-        // Create a new feeds slice with the additional feed
-        var feeds_list = try types.cloneFeedListFromSlice(self.allocator, group.feeds);
-        defer types.deinitFeedList(self.allocator, &feeds_list);
+        const arena_allocator = arena.allocator();
+        const xmlUrl = try arena_allocator.dupe(u8, feed_config.xmlUrl);
+        const text = if (feed_config.text) |t| try arena_allocator.dupe(u8, t) else null;
+        const title = if (feed_config.title) |t| try arena_allocator.dupe(u8, t) else null;
+        const htmlUrl = if (feed_config.htmlUrl) |h| try arena_allocator.dupe(u8, h) else null;
+        const description = if (feed_config.description) |d| try arena_allocator.dupe(u8, d) else null;
+        const language = if (feed_config.language) |l| try arena_allocator.dupe(u8, l) else null;
+        const version = if (feed_config.version) |v| try arena_allocator.dupe(u8, v) else null;
+        const etag = if (feed_config.etag) |e| try arena_allocator.dupe(u8, e) else null;
+        const lastModified = if (feed_config.lastModified) |lm| try arena_allocator.dupe(u8, lm) else null;
 
-        // Clone the feed config to persist all metadata
-        const xmlUrl = try self.allocator.dupe(u8, feed_config.xmlUrl);
-        errdefer self.allocator.free(xmlUrl);
-
-        const text = if (feed_config.text) |t| try self.allocator.dupe(u8, t) else null;
-        errdefer if (text) |t| self.allocator.free(t);
-
-        const title = if (feed_config.title) |t| try self.allocator.dupe(u8, t) else null;
-        errdefer if (title) |t| self.allocator.free(t);
-
-        const htmlUrl = if (feed_config.htmlUrl) |h| try self.allocator.dupe(u8, h) else null;
-        errdefer if (htmlUrl) |h| self.allocator.free(h);
-
-        const description = if (feed_config.description) |d| try self.allocator.dupe(u8, d) else null;
-        errdefer if (description) |d| self.allocator.free(d);
-
-        const language = if (feed_config.language) |l| try self.allocator.dupe(u8, l) else null;
-        errdefer if (language) |l| self.allocator.free(l);
-
-        const version = if (feed_config.version) |v| try self.allocator.dupe(u8, v) else null;
-        errdefer if (version) |v| self.allocator.free(v);
-
-        const etag = if (feed_config.etag) |e| try self.allocator.dupe(u8, e) else null;
-        errdefer if (etag) |e| self.allocator.free(e);
-
-        const lastModified = if (feed_config.lastModified) |lm| try self.allocator.dupe(u8, lm) else null;
-        errdefer if (lastModified) |lm| self.allocator.free(lm);
-
-        try feeds_list.append(self.allocator, types.FeedConfig{
+        var feeds_list = try arena_allocator.alloc(types.FeedConfig, group.feeds.len + 1);
+        for (group.feeds, 0..) |f, i| {
+            feeds_list[i] = f;
+        }
+        feeds_list[group.feeds.len] = types.FeedConfig{
             .xmlUrl = xmlUrl,
             .text = text,
             .enabled = feed_config.enabled,
@@ -277,22 +242,20 @@ pub const FeedGroupManager = struct {
             .version = version,
             .etag = etag,
             .lastModified = lastModified,
-        });
+        };
 
-        // Create updated group and save
         const updated_group = types.FeedGroup{
             .name = group.name,
             .display_name = group.display_name,
-            .feeds = feeds_list.items,
+            .feeds = feeds_list,
         };
 
         try self.saveGroupWithMetadata(updated_group);
     }
 
-    /// Get enabled feeds from a specific group
-    pub fn getEnabledFeeds(self: FeedGroupManager, group_name: []const u8) !types.FeedList {
-        var group = try self.loadGroupWithMetadata(group_name);
-        defer group.deinit(self.allocator);
+    /// Get enabled feeds from a specific group, allocating feed data into arena_allocator.
+    pub fn getEnabledFeeds(self: FeedGroupManager, arena_allocator: std.mem.Allocator, group_name: []const u8) !types.FeedList {
+        const group = try self.loadGroupWithMetadata(arena_allocator, group_name);
 
         return try types.filterEnabledFeeds(self.allocator, types.FeedList{
             .items = group.feeds,
@@ -302,11 +265,11 @@ pub const FeedGroupManager = struct {
 
     /// Get a list of all available group names by scanning the feeds directory
     pub fn getAllGroupNames(self: FeedGroupManager) ![]const []const u8 {
-        var dir = std.fs.cwd().openDir(self.feeds_dir, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.cwd().openDir(self.io, self.feeds_dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return &[_][]const u8{},
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(self.io);
 
         var groups = std.array_list.Managed([]const u8).init(self.allocator);
         errdefer {
@@ -315,19 +278,16 @@ pub const FeedGroupManager = struct {
         }
 
         var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(self.io)) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) {
-                // Skip hidden files
                 if (std.mem.startsWith(u8, entry.name, ".")) continue;
 
-                // Strip .json extension
-                const name_len = entry.name.len - 5; // ".json".len
+                const name_len = entry.name.len - 5;
                 const group_name = try self.allocator.dupe(u8, entry.name[0..name_len]);
                 try groups.append(group_name);
             }
         }
 
-        // Sort alphabetically for consistent output
         std.mem.sort([]const u8, groups.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.order(u8, a, b) == .lt;
@@ -337,8 +297,7 @@ pub const FeedGroupManager = struct {
         return groups.toOwnedSlice();
     }
 
-    fn parseGroupWithMetadata(self: FeedGroupManager, group_name: []const u8, contents: []const u8) !types.FeedGroup {
-        // Parse the group data format with metadata
+    fn parseGroupWithMetadata(self: FeedGroupManager, arena_allocator: std.mem.Allocator, group_name: []const u8, contents: []const u8) !types.FeedGroup {
         const GroupData = struct {
             text: ?[]const u8 = null,
             feeds: []const struct {
@@ -355,71 +314,43 @@ pub const FeedGroupManager = struct {
             },
         };
 
-        // Use arena allocator to avoid parse-then-copy overhead
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
+        // Temporary arena for JSON parsing
+        var json_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer json_arena.deinit();
 
-        const parsed = std.json.parseFromSliceLeaky(GroupData, arena.allocator(), contents, .{
+        const parsed = std.json.parseFromSliceLeaky(GroupData, json_arena.allocator(), contents, .{
             .ignore_unknown_fields = true,
         }) catch {
-            // Try parsing as legacy array format
-            return self.parseLegacyFeedArray(group_name, contents, arena.allocator());
+            return self.parseLegacyFeedArray(arena_allocator, group_name, contents);
         };
 
-        // Convert feeds
-        var feeds = try self.allocator.alloc(types.FeedConfig, parsed.feeds.len);
-        errdefer self.allocator.free(feeds);
+        // Allocate FeedConfigs in the long-lived arena_allocator — no errdefers needed
+        var feeds = try arena_allocator.alloc(types.FeedConfig, parsed.feeds.len);
 
         for (parsed.feeds, 0..) |raw_feed, i| {
-            const xmlUrl = try self.allocator.dupe(u8, raw_feed.xmlUrl);
-            errdefer self.allocator.free(xmlUrl);
-            const text = if (raw_feed.text) |t| try self.allocator.dupe(u8, t) else null;
-            errdefer if (text) |t| self.allocator.free(t);
-
-            const title = if (raw_feed.title) |t| try self.allocator.dupe(u8, t) else null;
-            errdefer if (title) |t| self.allocator.free(t);
-
-            const htmlUrl = if (raw_feed.htmlUrl) |h| try self.allocator.dupe(u8, h) else null;
-            errdefer if (htmlUrl) |h| self.allocator.free(h);
-
-            const description = if (raw_feed.description) |d| try self.allocator.dupe(u8, d) else null;
-            errdefer if (description) |d| self.allocator.free(d);
-
-            const language = if (raw_feed.language) |l| try self.allocator.dupe(u8, l) else null;
-            errdefer if (language) |l| self.allocator.free(l);
-
-            const version = if (raw_feed.version) |v| try self.allocator.dupe(u8, v) else null;
-            errdefer if (version) |v| self.allocator.free(v);
-
-            const etag = if (raw_feed.etag) |e| try self.allocator.dupe(u8, e) else null;
-            errdefer if (etag) |e| self.allocator.free(e);
-
-            const lastModified = if (raw_feed.lastModified) |lm| try self.allocator.dupe(u8, lm) else null;
-            errdefer if (lastModified) |lm| self.allocator.free(lm);
-
             feeds[i] = types.FeedConfig{
-                .xmlUrl = xmlUrl,
-                .text = text,
+                .xmlUrl = try arena_allocator.dupe(u8, raw_feed.xmlUrl),
+                .text = if (raw_feed.text) |t| try arena_allocator.dupe(u8, t) else null,
                 .enabled = raw_feed.enabled,
-                .title = title,
-                .htmlUrl = htmlUrl,
-                .description = description,
-                .language = language,
-                .version = version,
-                .etag = etag,
-                .lastModified = lastModified,
+                .title = if (raw_feed.title) |t| try arena_allocator.dupe(u8, t) else null,
+                .htmlUrl = if (raw_feed.htmlUrl) |h| try arena_allocator.dupe(u8, h) else null,
+                .description = if (raw_feed.description) |d| try arena_allocator.dupe(u8, d) else null,
+                .language = if (raw_feed.language) |l| try arena_allocator.dupe(u8, l) else null,
+                .version = if (raw_feed.version) |v| try arena_allocator.dupe(u8, v) else null,
+                .etag = if (raw_feed.etag) |e| try arena_allocator.dupe(u8, e) else null,
+                .lastModified = if (raw_feed.lastModified) |lm| try arena_allocator.dupe(u8, lm) else null,
             };
         }
 
         return types.FeedGroup{
-            .name = try self.allocator.dupe(u8, group_name),
-            .display_name = if (parsed.text) |t| try self.allocator.dupe(u8, t) else null,
+            .name = try arena_allocator.dupe(u8, group_name),
+            .display_name = if (parsed.text) |t| try arena_allocator.dupe(u8, t) else null,
             .feeds = feeds,
         };
     }
 
     /// Parse legacy array format [{ xmlUrl, text, ... }] and convert to FeedGroup
-    fn parseLegacyFeedArray(self: FeedGroupManager, group_name: []const u8, contents: []const u8, arena_allocator: std.mem.Allocator) !types.FeedGroup {
+    fn parseLegacyFeedArray(self: FeedGroupManager, arena_allocator: std.mem.Allocator, group_name: []const u8, contents: []const u8) !types.FeedGroup {
         const RawFeedConfig = struct {
             xmlUrl: []const u8,
             text: ?[]const u8 = null,
@@ -433,60 +364,35 @@ pub const FeedGroupManager = struct {
             lastModified: ?[]const u8 = null,
         };
 
-        const parsed = std.json.parseFromSliceLeaky([]RawFeedConfig, arena_allocator, contents, .{
+        // Temporary arena for JSON parsing
+        var json_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer json_arena.deinit();
+
+        const parsed = std.json.parseFromSliceLeaky([]RawFeedConfig, json_arena.allocator(), contents, .{
             .ignore_unknown_fields = true,
         }) catch {
             return error.ParseFailed;
         };
 
-        // Convert to FeedGroup format
-        var feeds = try self.allocator.alloc(types.FeedConfig, parsed.len);
-        errdefer self.allocator.free(feeds);
+        var feeds = try arena_allocator.alloc(types.FeedConfig, parsed.len);
 
         for (parsed, 0..) |raw_feed, i| {
-            const xmlUrl = try self.allocator.dupe(u8, raw_feed.xmlUrl);
-            errdefer self.allocator.free(xmlUrl);
-
-            const text = if (raw_feed.text) |t| try self.allocator.dupe(u8, t) else null;
-            errdefer if (text) |t| self.allocator.free(t);
-
-            const title = if (raw_feed.title) |t| try self.allocator.dupe(u8, t) else null;
-            errdefer if (title) |t| self.allocator.free(t);
-
-            const htmlUrl = if (raw_feed.htmlUrl) |h| try self.allocator.dupe(u8, h) else null;
-            errdefer if (htmlUrl) |h| self.allocator.free(h);
-
-            const description = if (raw_feed.description) |d| try self.allocator.dupe(u8, d) else null;
-            errdefer if (description) |d| self.allocator.free(d);
-
-            const language = if (raw_feed.language) |l| try self.allocator.dupe(u8, l) else null;
-            errdefer if (language) |l| self.allocator.free(l);
-
-            const version = if (raw_feed.version) |v| try self.allocator.dupe(u8, v) else null;
-            errdefer if (version) |v| self.allocator.free(v);
-
-            const etag = if (raw_feed.etag) |e| try self.allocator.dupe(u8, e) else null;
-            errdefer if (etag) |e| self.allocator.free(e);
-
-            const lastModified = if (raw_feed.lastModified) |lm| try self.allocator.dupe(u8, lm) else null;
-            errdefer if (lastModified) |lm| self.allocator.free(lm);
-
             feeds[i] = types.FeedConfig{
-                .xmlUrl = xmlUrl,
-                .text = text,
+                .xmlUrl = try arena_allocator.dupe(u8, raw_feed.xmlUrl),
+                .text = if (raw_feed.text) |t| try arena_allocator.dupe(u8, t) else null,
                 .enabled = raw_feed.enabled,
-                .title = title,
-                .htmlUrl = htmlUrl,
-                .description = description,
-                .language = language,
-                .version = version,
-                .etag = etag,
-                .lastModified = lastModified,
+                .title = if (raw_feed.title) |t| try arena_allocator.dupe(u8, t) else null,
+                .htmlUrl = if (raw_feed.htmlUrl) |h| try arena_allocator.dupe(u8, h) else null,
+                .description = if (raw_feed.description) |d| try arena_allocator.dupe(u8, d) else null,
+                .language = if (raw_feed.language) |l| try arena_allocator.dupe(u8, l) else null,
+                .version = if (raw_feed.version) |v| try arena_allocator.dupe(u8, v) else null,
+                .etag = if (raw_feed.etag) |e| try arena_allocator.dupe(u8, e) else null,
+                .lastModified = if (raw_feed.lastModified) |lm| try arena_allocator.dupe(u8, lm) else null,
             };
         }
 
         return types.FeedGroup{
-            .name = try self.allocator.dupe(u8, group_name),
+            .name = try arena_allocator.dupe(u8, group_name),
             .display_name = null,
             .feeds = feeds,
         };

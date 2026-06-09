@@ -3,9 +3,7 @@
 const std = @import("std");
 const types = @import("types");
 
-const curl = @cImport({
-    @cInclude("curl/curl.h");
-});
+const curl = @import("c");
 
 pub const FetchStatus = enum {
     Success, // 200 OK with content
@@ -48,6 +46,9 @@ const TransferContext = struct {
     etag_buffer: ?[]u8 = null,
     last_modified_buffer: ?[]u8 = null,
     header_list: ?*curl.curl_slist = null, // For freeing custom headers
+    // Request header strings that must live until after curl finishes
+    request_etag: ?[:0]u8 = null,
+    request_lastmod: ?[:0]u8 = null,
     // UTF-8 validation state for streaming validation
     partial_sequence: [4]u8 = undefined, // Buffer for incomplete UTF-8 sequences
     partial_len: u8 = 0, // Number of bytes in partial_sequence
@@ -66,6 +67,8 @@ const TransferContext = struct {
             .etag_buffer = null,
             .last_modified_buffer = null,
             .header_list = null,
+            .request_etag = null,
+            .request_lastmod = null,
             .partial_sequence = undefined,
             .partial_len = 0,
         };
@@ -78,6 +81,8 @@ const TransferContext = struct {
         }
         if (self.etag_buffer) |buf| self.allocator.free(buf);
         if (self.last_modified_buffer) |buf| self.allocator.free(buf);
+        if (self.request_etag) |h| self.allocator.free(h);
+        if (self.request_lastmod) |h| self.allocator.free(h);
     }
 };
 
@@ -185,7 +190,7 @@ pub fn fetchMultipleWithCallback(
     callback: ?FetchCallback,
     callback_user_data: ?*anyopaque,
 ) ![]FetchResult {
-    const max_bytes: usize = @intFromFloat(max_feed_size_mb * 1024 * 1024);
+    const max_bytes: usize = @trunc(max_feed_size_mb * 1024.0 * 1024.0);
 
     // Initialize multi handle
     const multi_handle = curl.curl_multi_init() orelse return error.OutOfMemory;
@@ -216,6 +221,8 @@ pub fn fetchMultipleWithCallback(
             .etag_buffer = null,
             .last_modified_buffer = null,
             .header_list = null,
+            .request_etag = null,
+            .request_lastmod = null,
             .partial_sequence = undefined,
             .partial_len = 0,
         };
@@ -289,7 +296,7 @@ pub fn fetchMultipleWithCallback(
                 contexts[i].curl_error = true;
                 continue;
             };
-            defer allocator.free(header_z);
+            contexts[i].request_etag = header_z;
             headers = curl.curl_slist_append(headers, header_z.ptr);
         }
 
@@ -303,7 +310,7 @@ pub fn fetchMultipleWithCallback(
                 contexts[i].curl_error = true;
                 continue;
             };
-            defer allocator.free(header_z);
+            contexts[i].request_lastmod = header_z;
             headers = curl.curl_slist_append(headers, header_z.ptr);
         }
 
@@ -539,16 +546,16 @@ fn headerCallback(data: [*c]const u8, size: usize, nmemb: usize, user_data: ?*an
     const line = data[0..total_size];
 
     // Helper to clean CRLF
-    const trimmed = std.mem.trimRight(u8, line, "\r\n ");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n ");
 
     if (std.ascii.startsWithIgnoreCase(trimmed, "ETag:")) {
-        if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
+        if (std.mem.find(u8, trimmed, ":")) |colon_pos| {
             const val = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " ");
             if (ctx.etag_buffer) |old| ctx.allocator.free(old);
             ctx.etag_buffer = ctx.allocator.dupe(u8, val) catch null;
         }
     } else if (std.ascii.startsWithIgnoreCase(trimmed, "Last-Modified:")) {
-        if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
+        if (std.mem.find(u8, trimmed, ":")) |colon_pos| {
             const val = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " ");
             if (ctx.last_modified_buffer) |old| ctx.allocator.free(old);
             ctx.last_modified_buffer = ctx.allocator.dupe(u8, val) catch null;
