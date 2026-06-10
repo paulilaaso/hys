@@ -4,7 +4,7 @@
 
 ### Hys — RSS Reader for Digital Minimalists
 [![License: MIT](https://img.shields.io/badge/License-MIT-F2A33A.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/Zig-0.15.2-F2A33A.svg)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-F2A33A.svg)](https://ziglang.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-F2A33A)](https://github.com/superstarryeyes/hys)
 [![Terminal](https://img.shields.io/badge/interface-terminal-F2A33A.svg)](https://github.com/superstarryeyes/hys)
 [![Discord](https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/z8sE2gnMNk)
@@ -61,7 +61,7 @@ hys
 
 ### Prerequisites
 
-- **Zig 0.15.2**: For building from source. [Install instructions](https://ziglang.org/learn/getting-started/#managers)
+- **Zig 0.16.0**: For building from source. [Install instructions](https://ziglang.org/learn/getting-started/#managers)
 - **libcurl**: Robust HTTP/2 and TLS support. Install via your package manager:
   - macOS: Pre-installed (no action needed)
   - Ubuntu/Debian: `sudo apt-get install libcurl4-openssl-dev`

@@ -1,14 +1,15 @@
 .{
     .name = .app,
     .version = "0.2.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .libexpat = .{
-            .url = "git+https://github.com/allyourcodebase/libexpat.git?ref=2.7.1-1#472c1db660c813a952f235cb394f5997d2e83fe1",
-            .hash = "libexpat-2.7.1-1-y_akI-w7AABhqRN54g--MNNIR-zA1X2WZ36ZPriY84sb",
+            .url = "git+https://github.com/superstarryeyes/libexpat.git#9b6452b686ec5ffc911530b6afbdddf4baa8e4b1",
+            .hash = "libexpat-2.7.1-4-y_akI3g7AADWBFW-W_rXPaNsE0c1pWoftTzmHuR_-4Ff",
         },
         .zdt = .{
-            .url = "git+https://codeberg.org/FObersteiner/zdt.git?ref=v0.9.4#650f57f4749cf4ec0718f2ff81b229596201a894",
-            .hash = "zdt-0.9.4-xr0_vJTaEQAq-crEean1EPItDfn0wIBKqp2pkWhvUtbx",
+            .url = "git+https://codeberg.org/FObersteiner/zdt.git#ef21e970c3fead80b4a43051f8e7ab5327efa4b1",
+            .hash = "zdt-0.9.4-xr0_vHvnEQBa2kexZk6j3CrdybDFd0BHa7DdL7hgDqfD",
         },
     },
     .paths = .{""},

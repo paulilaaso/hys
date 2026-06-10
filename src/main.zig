@@ -61,15 +61,23 @@ pub fn main(init: std.process.Init) !void {
     // Windows ANSI fix
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
-        const handle = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE) orelse w.INVALID_HANDLE_VALUE;
+        const kernel32 = struct {
+            pub extern "kernel32" fn GetStdHandle(nStdHandle: w.DWORD) callconv(w.WINAPI) ?w.HANDLE;
+            pub extern "kernel32" fn GetConsoleMode(hConsoleHandle: w.HANDLE, lpMode: *w.DWORD) callconv(w.WINAPI) i32;
+            pub extern "kernel32" fn SetConsoleMode(hConsoleHandle: w.HANDLE, dwMode: w.DWORD) callconv(w.WINAPI) i32;
+            pub extern "kernel32" fn SetConsoleOutputCP(wCodePageID: w.UINT) callconv(w.WINAPI) i32;
+        };
+        const STD_OUTPUT_HANDLE: w.DWORD = @bitCast(@as(i32, -11));
+
+        const handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE) orelse w.INVALID_HANDLE_VALUE;
         var mode: w.DWORD = 0;
-        if (w.kernel32.GetConsoleMode(handle, &mode) != 0) {
+        if (kernel32.GetConsoleMode(handle, &mode) != 0) {
             // ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-            _ = w.kernel32.SetConsoleMode(handle, mode | 4);
+            _ = kernel32.SetConsoleMode(handle, mode | 4);
         }
         // Also set UTF-8 output mode for emojis/CJK
         // CP_UTF8 = 65001
-        _ = w.kernel32.SetConsoleOutputCP(65001);
+        _ = kernel32.SetConsoleOutputCP(65001);
     }
 
     // Initialize libcurl globally (must be done before any curl operations)

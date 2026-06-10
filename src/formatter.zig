@@ -253,9 +253,15 @@ pub const Formatter = struct {
         // 2) Windows implementation using GetConsoleScreenBufferInfo
         if (builtin.os.tag == .windows) {
             const w = std.os.windows;
-            const handle = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE) orelse return 80;
+            const kernel32 = struct {
+                pub extern "kernel32" fn GetStdHandle(nStdHandle: w.DWORD) callconv(w.WINAPI) ?w.HANDLE;
+                pub extern "kernel32" fn GetConsoleScreenBufferInfo(hConsoleOutput: w.HANDLE, lpConsoleScreenBufferInfo: *w.CONSOLE_SCREEN_BUFFER_INFO) callconv(w.WINAPI) i32;
+            };
+            const STD_OUTPUT_HANDLE: w.DWORD = @bitCast(@as(i32, -11));
+
+            const handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE) orelse return 80;
             var info: w.CONSOLE_SCREEN_BUFFER_INFO = undefined;
-            if (w.kernel32.GetConsoleScreenBufferInfo(handle, &info) != 0) {
+            if (kernel32.GetConsoleScreenBufferInfo(handle, &info) != 0) {
                 const width: i16 = info.srWindow.Right - info.srWindow.Left + 1;
                 if (width > 0) return @intCast(width);
             }
