@@ -340,7 +340,8 @@ pub const Formatter = struct {
         self.writef("{s}{s}┌─ {s} ", .{ bold, color, group_name });
 
         const term_width = self.getTermWidth();
-        const prefix_len = 3 + group_name.len + 1; // "┌─ " + name + " "
+        const name_width = self.calculateVisualWidth(group_name);
+        const prefix_len = 3 + name_width + 1;
         const padding_len = if (prefix_len < term_width) term_width - prefix_len else 1;
 
         for (0..padding_len) |_| {
@@ -361,7 +362,8 @@ pub const Formatter = struct {
 
         // Calculate padding to fill the terminal width
         const term_width = self.getTermWidth();
-        const prefix_len = indent_spaces + 3 + feed_name.len + 1;
+        const name_width = self.calculateVisualWidth(feed_name);
+        const prefix_len = indent_spaces + 3 + name_width + 1;
         const padding_len = if (prefix_len < term_width) term_width - prefix_len else 1;
 
         for (0..padding_len) |_| {
