@@ -57,11 +57,12 @@ const MockCliParser = struct {
         const valid_flags = [_][]const u8{
             "--help", "-h",      "--config", "--add",      "--export",
             "--name", "--reset", "--pager",  "--no-pager", "-day", "--sub", "-s",
+            "--day", "-d", "--last", "-l",
         };
 
         // Flags that consume the next argument
         const flags_with_values = [_][]const u8{
-            "--add", "--export", "--name", "-day", "--sub", "-s",
+            "--add", "--export", "--name", "-day", "--sub", "-s", "--day", "-d",
         };
 
         while (i < self.args.len) {
@@ -568,3 +569,5 @@ test "--json does not interfere with group name parsing" {
     // Note: parseGroupName won't work here because --json isn't in the mock's valid_flags
     // This test validates that --json is detected alongside other args
 }
+
+

@@ -14,6 +14,7 @@ const valid_flags_map = std.StaticStringMap(void).initComptime(.{
     .{ "--pager", {} },   .{ "--no-pager", {} },
     .{ "--all", {} },     .{ "-a", {} },
     .{ "--day", {} },     .{ "-d", {} },
+    .{ "--last", {} },    .{ "-l", {} },
     .{ "--json", {} },    .{ "-j", {} },
 });
 
@@ -232,9 +233,9 @@ pub const CliParser = struct {
             \\    -g, --groups                  List all available feed groups
             \\    -c, --config                  Show config file location
             \\    -a, --all                     Fetch and display feeds from all groups
-            \\    -d, --day <NUM>               Fetch history for current group (1 for previous)
-            \\
-            \\    -s, --sub "<URL>" [NAME]      Subscribe to feed URL with optional display name
+    \\    -d, --day <NUM>               Fetch history for current group (1 for previous)
+    \\    -l, --last                    Show the last fetched digest without fetching new data
+    \\    -s, --sub "<URL>" [NAME]      Subscribe to feed URL with optional display name
             \\    -i, --import <FILE>           Import OPML file to current group
             \\    -e, --export <FILE>           Export current group's feeds to OPML
             \\    -n, --name <NAME>             Set display name for current group

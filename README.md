@@ -128,6 +128,7 @@ hys https://example.com/rss.xml
 | :--- | :--- |
 | Read from all groups | `hys --all` |
 | View previous days' fetches | `hys --day 1` or `hys --day 2` |
+| View last fetch regardless of date | `hys --last` or `hys -l` |
 | Reset today's daily limiter | `hys --reset` |
 
 ### Config and Pager

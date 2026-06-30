@@ -494,9 +494,11 @@ fn runApp(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.En
     const group_display_name = config_manager.getGroupDisplayName(primary_group_name) catch null;
     defer if (group_display_name) |display| allocator.free(display);
 
-    if (hasAnyArg(cli, "--day", "-d")) {
-        const day_str = getAnyArgValue(cli, "--day", "-d") orelse "0";
-        const day_offset = std.fmt.parseInt(i32, day_str, 10) catch 0;
+    if (hasAnyArg(cli, "--day", "-d") or hasAnyArg(cli, "--last", "-l")) {
+        const day_offset = if (hasAnyArg(cli, "--last", "-l")) @as(i32, 0) else blk: {
+            const day_str = getAnyArgValue(cli, "--day", "-d") orelse "0";
+            break :blk std.fmt.parseInt(i32, day_str, 10) catch 0;
+        };
 
         var all_cached_items = std.array_list.Managed(types.RssItem).init(allocator);
         defer all_cached_items.deinit();
