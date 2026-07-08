@@ -4,7 +4,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .libexpat = .{
-            .url = "git+https://github.com/superstarryeyes/libexpat.git#9b6452b686ec5ffc911530b6afbdddf4baa8e4b1",
+            .url = "git+https://github.com/paulilaaso/libexpat.git#9b6452b686ec5ffc911530b6afbdddf4baa8e4b1",
             .hash = "libexpat-2.7.1-4-y_akI3g7AADWBFW-W_rXPaNsE0c1pWoftTzmHuR_-4Ff",
         },
         .zdt = .{

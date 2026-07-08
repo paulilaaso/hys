@@ -3,13 +3,6 @@
 <img src="images/hys-icon.png" alt="Hys Icon" width="35%" />
 
 ### Hys — RSS Reader for Digital Minimalists
-[![License: MIT](https://img.shields.io/badge/License-MIT-F2A33A.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/Zig-0.16.0-F2A33A.svg)](https://ziglang.org)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-F2A33A)](https://github.com/superstarryeyes/hys)
-[![Terminal](https://img.shields.io/badge/interface-terminal-F2A33A.svg)](https://github.com/superstarryeyes/hys)
-[![Discord](https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/z8sE2gnMNk)
-
-[Features](#-features) • [Quick Start](#-quick-start-macoslinux) • [Installation](#-installation-macoslinuxwindows) • [Usage](#-usage) • [Configuration](#️-configuration) • [Contributing](#️-contributing) • [License](#-license)
 
 <img src="images/hys-screenshot.gif" alt="Hys Screenshot" width="100%" />
 
@@ -19,28 +12,28 @@ Hys is a fast, lightweight, and opinionated terminal RSS reader written in Zig t
 
 ---
 
-## ✨ Features
+## Features
 
 | **Feature** | **Description** |
 | :--- | :--- |
-| **🧠 Doomscroll-Free** | Designed as a "Daily Digest." Enforces a fetch limit to help you stay informed without the infinite scroll. |
-| **⚡ Blazing Fast** | Built with Zig. Starts in milliseconds and parses hundreds of items in seconds. |
-| **🔗 Open Links** | OSC 8 hyperlink support to open articles in your default browser from URLs and links. |
-| **🔌 OPML Ready** | Import your existing subscriptions from any standard RSS reader or export your feeds effortlessly. |
-| **🌍 Multilingual Support** | Native support for Chinese, Japanese, Korean, Indic, Cyrillic etc. |
-| **📁 Feed Groups** | Organize your feeds into groups (e.g. `tech`, `science`, `art`) and read them individually or all at once. |
-| **📖 Pager TUI**| Automatically pipes into `less` for a distraction-free reading experience with intuitive vim-style keybindings. |
-| **🤖 AI-Friendly**| Optional plain JSON output for seamless integration with AI agents and LLM workflows. |
-| **🔎 Search** | Find text in your feeds with the search functionality integrated into `less`. |
-| **📰 Universal Feed Support**           | RSS 2.0 and Atom 1.0 with robust parsing, HTML entity decoding, and UTF-8 validation          |
+| **Doomscroll-Free** | Designed as a "Daily Digest." Enforces a fetch limit to help you stay informed without the infinite scroll. |
+| **Blazing Fast** | Built with Zig. Starts in milliseconds and parses hundreds of items in seconds. |
+| **Open Links** | OSC 8 hyperlink support to open articles in your default browser from URLs and links. |
+| **OPML Ready** | Import your existing subscriptions from any standard RSS reader or export your feeds effortlessly. |
+| **Multilingual Support** | Native support for Chinese, Japanese, Korean, Indic, Cyrillic etc. |
+| **Feed Groups** | Organize your feeds into groups (e.g. `tech`, `science`, `art`) and read them individually or all at once. |
+| **Pager TUI**| Automatically pipes into `less` for a distraction-free reading experience with intuitive vim-style keybindings. |
+| **AI-Friendly**| Optional plain JSON output for seamless integration with AI agents and LLM workflows. |
+| **Search** | Find text in your feeds with the search functionality integrated into `less`. |
+| **Universal Feed Support**           | RSS 2.0 and Atom 1.0 with robust parsing, HTML entity decoding, and UTF-8 validation          |
 
 ---
 
-## 🚀 Quick Start (macOS/Linux)
+## Quick Start (macOS/Linux)
 
 ### Homebrew
 ```bash
-brew install superstarryeyes/tap/hys
+brew install paulilaaso/tap/hys
 ```
 
 ### Arch Linux (AUR)
@@ -57,7 +50,7 @@ hys
 
 ---
 
-## 📦 Installation (macOS/Linux/Windows)
+## Installation (macOS/Linux/Windows)
 
 ### Prerequisites
 
@@ -73,7 +66,7 @@ hys
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/superstarryeyes/hys.git
+   git clone https://github.com/paulilaaso/hys.git
    cd hys
    ```
 
@@ -85,7 +78,7 @@ hys
 
 ---
 
-## 💻 Usage
+## Usage
 
 ### Reading Feeds
 
@@ -174,7 +167,7 @@ When Hys opens in your system pager (`less`), these keys are available:
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 Hys creates a JSON configuration file at `~/.hys/config.json` on first run.
 
@@ -217,24 +210,6 @@ To remove or edit a feed:
 
 ---
 
-## 🛠️ Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-Join our Discord community for discussions, support and collaboration.
-
-[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&style=for-the-badge)](https://discord.gg/z8sE2gnMNk)
-
----
-
-## 📄 License
+## License
 
 This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-
-**⭐ Star this repo** if you find it useful!
-
-</div>
