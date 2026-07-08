@@ -73,7 +73,7 @@ pub const OpmlManager = struct {
             if (c.curl_easy_setopt(handle, c.CURLOPT_CONNECTTIMEOUT, @as(c_long, 10)) != c.CURLE_OK) break :blk false;
             if (c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 30)) != c.CURLE_OK) break :blk false;
             if (c.curl_easy_setopt(handle, c.CURLOPT_ACCEPT_ENCODING, "") != c.CURLE_OK) break :blk false;
-            if (c.curl_easy_setopt(handle, c.CURLOPT_USERAGENT, "hys-rss/0.2.0") != c.CURLE_OK) break :blk false;
+            if (c.curl_easy_setopt(handle, c.CURLOPT_USERAGENT, "hys-rss/0.3.0") != c.CURLE_OK) break :blk false;
             break :blk true;
         };
 

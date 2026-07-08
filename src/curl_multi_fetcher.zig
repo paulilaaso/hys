@@ -331,7 +331,7 @@ pub fn fetchMultipleWithCallback(
         _ = curl.curl_easy_setopt(easy, curl.CURLOPT_ACCEPT_ENCODING, "");
 
         // User agent
-        _ = curl.curl_easy_setopt(easy, curl.CURLOPT_USERAGENT, "hys-rss/0.2.0");
+        _ = curl.curl_easy_setopt(easy, curl.CURLOPT_USERAGENT, "hys-rss/0.3.0");
 
         // Enable connection pooling and HTTP/2
         _ = curl.curl_easy_setopt(easy, curl.CURLOPT_FRESH_CONNECT, @as(c_long, 0));
